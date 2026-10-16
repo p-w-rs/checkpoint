@@ -98,8 +98,9 @@ def _refresh(rec: dict[str, Any], ptable: dict[int, dict[str, Any]]) -> dict[str
         except ValueError:
             rec["exit_code"] = None
         rec["state"] = "exited"
-        rec.setdefault("ended", time.strftime("%Y-%m-%dT%H:%M:%S%z",
-                                              time.localtime(exitf.stat().st_mtime)))
+        end = exitf.stat().st_mtime
+        rec.setdefault("ended", time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(end)))
+        rec.setdefault("ended_ts", end)
         return rec
     p = ptable.get(rec["pid"])
     if p and rec["id"] in p["cmd"]:
@@ -128,7 +129,7 @@ def refresh_all() -> dict[str, dict[str, Any]]:
             before = rec.get("state")
             _refresh(rec, ptable)
             if before == "running" and rec["state"] != "running":
-                rec["ended_ts"] = time.time()
+                rec.setdefault("ended_ts", time.time())
         _save(reg)
     return reg["jobs"]
 

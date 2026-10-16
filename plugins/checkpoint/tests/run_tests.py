@@ -311,9 +311,10 @@ print("jobs:")
 r = jobs.start("quick", command="echo hello; echo err >&2; exit 3", cwd=str(PROJ),
                redo_hint="rerun", session_id=SID)
 check("job_start ok", r["ok"] and r["job"]["state"] == "running")
-time.sleep(0.6)
+time.sleep(1.5)
 s = jobs.status("quick")["job"]
 check("exit code captured", s["state"] == "exited" and s["exit_code"] == 3)
+check("runtime ends at exit, not at status check", s["runtime_s"] < 1.0)
 check("tail has stdout and stderr", "hello" in jobs.tail("quick")["tail"] and "err" in jobs.tail("quick")["tail"])
 r = jobs.start("long", argv=["sleep", "30"], cwd=str(PROJ), redo_hint="rerun", session_id=SID)
 check("argv job running", jobs.status("long")["job"]["state"] == "running")
