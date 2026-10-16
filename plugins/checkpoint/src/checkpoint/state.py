@@ -1,7 +1,7 @@
 """Shared state on disk: sessions, pause flags, counters, config.
 
-Layout under home() (AGENT_PAUSE_HOME, default
-${XDG_STATE_HOME:-~/.local/state}/agent-pause):
+Layout under home() (CHECKPOINT_HOME, default
+${XDG_STATE_HOME:-~/.local/state}/checkpoint):
 
     sessions/<sid>.json   {session_id, cwd, claude_pid, transcript_path, paused, ...}
     flags/<sid>           exists = this session is paused (the shell pre-filter reads it)
@@ -34,7 +34,7 @@ def work_dir_name() -> str:
     """Trackers live in <project>/<this>/<task>/TRACKER.md. Not under .claude/:
     Claude Code asks before every write there, and no rule or hook can lift
     that. An env var, not config, because hooks/fast.sh reads it too."""
-    return os.environ.get("AGENT_PAUSE_WORK_DIR") or ".work"
+    return os.environ.get("CHECKPOINT_WORK_DIR") or ".work"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "nudge_every": 25,
@@ -42,9 +42,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "allow_while_paused": [
         "Read", "Glob", "Grep", "TodoWrite", "TaskList", "TaskGet",
         "mcp__ccd_turn__*",
-        "mcp__plugin_agent-pause_jobs__job_status",
-        "mcp__plugin_agent-pause_jobs__job_tail",
-        "mcp__plugin_agent-pause_jobs__job_stop",
+        "mcp__plugin_check_jobs__job_status",
+        "mcp__plugin_check_jobs__job_tail",
+        "mcp__plugin_check_jobs__job_stop",
     ],
     "non_user_prompt_prefixes": [
         "<task-notification>", "[Subagent hand-back]", "<side-sessions-event>",
@@ -55,16 +55,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 
 def home() -> Path:
-    env = os.environ.get("AGENT_PAUSE_HOME")
+    env = os.environ.get("CHECKPOINT_HOME")
     if env:
         return Path(env)
     base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
-    return Path(base) / "agent-pause"
+    return Path(base) / "checkpoint"
 
 
 def load_config() -> dict[str, Any]:
     cfg = dict(DEFAULT_CONFIG)
-    path = Path(os.environ.get("AGENT_PAUSE_CONFIG") or PLUGIN_ROOT / "config" / "settings.json")
+    path = Path(os.environ.get("CHECKPOINT_CONFIG") or PLUGIN_ROOT / "config" / "settings.json")
     try:
         cfg.update({k: v for k, v in json.loads(path.read_text()).items()
                     if not k.startswith("_")})
@@ -72,7 +72,7 @@ def load_config() -> dict[str, Any]:
         pass
     except (OSError, ValueError) as e:
         import sys
-        print(f"agent-pause: ignoring unreadable {path}: {e}", file=sys.stderr)
+        print(f"checkpoint: ignoring unreadable {path}: {e}", file=sys.stderr)
     return cfg
 
 

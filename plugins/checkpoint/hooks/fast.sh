@@ -1,5 +1,5 @@
 #!/bin/sh
-# Shell pre-filter for every agent-pause hook. Usage: fast.sh EVENT PLUGIN_ROOT
+# Shell pre-filter for every checkpoint hook. Usage: fast.sh EVENT PLUGIN_ROOT
 #
 # PreToolUse and PostToolUse run on every tool call, so the common path (not
 # paused, nothing queued) must not start Python. This script checks flag files
@@ -7,8 +7,8 @@
 # to do. It always exits 0 and prints only what Python prints (fail open).
 ev=$1
 root=$2
-st=${AGENT_PAUSE_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-pause}
-work=${AGENT_PAUSE_WORK_DIR:-.work}
+st=${CHECKPOINT_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/checkpoint}
+work=${CHECKPOINT_WORK_DIR:-.work}
 input=$(cat)
 
 # First "key":"value" string in the payload (Claude Code puts session_id,
@@ -20,10 +20,10 @@ field() {
 safe() { printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_' | cut -c 1-128; }
 
 py() {
-    if [ -n "$AGENT_PAUSE_PYTHON" ]; then
-        printf '%s' "$input" | AGENT_PAUSE_HOOK_PPID=$PPID "$AGENT_PAUSE_PYTHON" "$root/run.py" "$@" 2>/dev/null
+    if [ -n "$CHECKPOINT_PYTHON" ]; then
+        printf '%s' "$input" | CHECKPOINT_HOOK_PPID=$PPID "$CHECKPOINT_PYTHON" "$root/run.py" "$@" 2>/dev/null
     else
-        printf '%s' "$input" | AGENT_PAUSE_HOOK_PPID=$PPID pixi run --manifest-path "$root/pixi.toml" \
+        printf '%s' "$input" | CHECKPOINT_HOOK_PPID=$PPID pixi run --manifest-path "$root/pixi.toml" \
             --frozen python "$root/run.py" "$@" 2>/dev/null
     fi
 }
@@ -41,7 +41,7 @@ UserPromptSubmit)
     echo 0 > "$st/turn/$sid" 2>/dev/null
     : > "$st/turn-start/$sid" 2>/dev/null
     if paused || printf '%s' "$input" | grep -Eqi \
-        '"prompt"[[:space:]]*:[[:space:]]*"[[:space:]]*(/agent-pause:|pause([[:space:]]+(now|all|all[[:space:]]+now|now[[:space:]]+all))?[.!]?[[:space:]]*")'; then
+        '"prompt"[[:space:]]*:[[:space:]]*"[[:space:]]*(/check:|pause([[:space:]]+(now|all|all[[:space:]]+now|now[[:space:]]+all))?[.!]?[[:space:]]*")'; then
         py hook-prompt
     fi
     ;;
@@ -56,7 +56,7 @@ PreToolUse)
         # A pause command typed while busy waits in Claude Code's queue, which
         # is written to the transcript at once (DESIGN.md, Spike 1).
         line=$(tail -c 262144 "$tp" 2>/dev/null | grep '"queue-operation"' |
-            grep -E 'agent-pause:pause|"content":"[[:space:]]*[Pp]ause' | tail -n 1)
+            grep -E 'check:pause|"content":"[[:space:]]*[Pp]ause' | tail -n 1)
         if [ -n "$line" ] && [ "$line" != "$(cat "$st/seen/$sid" 2>/dev/null)" ]; then
             py hook-gate
             exit 0
@@ -95,7 +95,7 @@ PostToolUse|PostToolUseFailure)
     n=$(cat "$st/count/$sid" 2>/dev/null); n=${n:-0}
     n=$((n + 1))
     echo $n > "$st/count/$sid" 2>/dev/null
-    if [ "$n" -ge "${AGENT_PAUSE_NUDGE_EVERY:-25}" ]; then
+    if [ "$n" -ge "${CHECKPOINT_NUDGE_EVERY:-25}" ]; then
         py hook-post
     fi
     ;;

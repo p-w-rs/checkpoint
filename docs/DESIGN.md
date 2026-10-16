@@ -1,4 +1,4 @@
-# agent-pause: design
+# checkpoint: design
 
 Status: **built and installed** (v0.1.0, 2026-10-15); see
 [ARCHITECTURE.md](ARCHITECTURE.md). Spikes run 2026-10-15 on Claude Code
@@ -55,7 +55,7 @@ Decided: this location (committable, or gitignored per project). First
 planned as `.claude/work/`, but Claude Code treats every path under
 `.claude/` as sensitive and asks before each write; neither an allow rule
 (`Write(.claude/work/**)`) nor a PreToolUse `allow` from a hook lifts that
-(checked live). So the user chose `.work/`; `AGENT_PAUSE_WORK_DIR` changes it.
+(checked live). So the user chose `.work/`; `CHECKPOINT_WORK_DIR` changes it.
 
 `TRACKER.md` template:
 
@@ -109,7 +109,7 @@ Because the tracker is kept current all along, pausing only has to top it up.
 
 ## 2. Jobs (long work that survives)
 
-An MCP server (stdio, Python stdlib, launched through pixi like net-gateway's)
+An MCP server (stdio, Python stdlib, launched through pixi like gateway's)
 with:
 
 | Tool | Does |
@@ -119,7 +119,7 @@ with:
 | `job_tail(name, lines)` | End of the log. |
 | `job_stop(name, reason)` | SIGTERM the group, then SIGKILL after a grace period; records why and the last log lines. |
 
-- Registry: `${XDG_STATE_HOME:-~/.local/state}/agent-pause/jobs.json`
+- Registry: `${XDG_STATE_HOME:-~/.local/state}/checkpoint/jobs.json`
   (flock'd), plus logs under `.../jobs/<id>/`.
 - The SessionStart note says: anything likely to run more than ~2 minutes
   goes through `job_start`, and gets a row in the tracker's Jobs table.
@@ -134,14 +134,14 @@ with:
 
 | Command | Effect |
 |---|---|
-| `/agent-pause:pause` | Pause this session at its next tool call (typed while busy; see "Queued commands" below), or right away if idle. |
-| `/agent-pause:pause all` | Pause every session on the machine. |
-| `/agent-pause:pause now` | Also kill the session's running **foreground** command right away (see below). |
-| `/agent-pause:pause now --stop-jobs` | ...and stop its detached jobs too. |
-| `/agent-pause:resume` | Resume this session (see below). |
-| `/agent-pause:resume all` | Clear the global flag. |
-| `/agent-pause:resume <task>` | In a **new** session: pick up a task from its tracker alone. |
-| `/agent-pause:status` | Which sessions are paused / working, their tasks, jobs. |
+| `/check:pause` | Pause this session at its next tool call (typed while busy; see "Queued commands" below), or right away if idle. |
+| `/check:pause all` | Pause every session on the machine. |
+| `/check:pause now` | Also kill the session's running **foreground** command right away (see below). |
+| `/check:pause now --stop-jobs` | ...and stop its detached jobs too. |
+| `/check:resume` | Resume this session (see below). |
+| `/check:resume all` | Clear the global flag. |
+| `/check:resume <task>` | In a **new** session: pick up a task from its tracker alone. |
+| `/check:status` | Which sessions are paused / working, their tasks, jobs. |
 
 Recommended (user deferred to us): `pause now` leaves **detached jobs running**
 by default, since surviving pauses is the whole point of jobs; `--stop-jobs`
@@ -159,14 +159,14 @@ queue format below changes.
 #### Queued commands
 
 When a session is busy, Claude Code appends
-`{"type":"queue-operation","operation":"enqueue","content":"/agent-pause:pause",...}`
+`{"type":"queue-operation","operation":"enqueue","content":"/check:pause",...}`
 to the session transcript the moment the user presses Enter, then
 `dequeue` when the turn ends and the command runs (`remove` when a plain
 message gets injected mid-turn instead). PreToolUse gets
 `transcript_path`, so the gate:
 
 1. pre-filter (shell): flag file exists, **or** the last ~256 KB of the
-   transcript contains `/agent-pause:pause`; else exit;
+   transcript contains `/check:pause`; else exit;
 2. replays the queue ops in that tail (enqueue appends, dequeue pops the
    front, remove drops by content); if a pending entry is a pause command
    newer than the last one handled (timestamp kept in the session's state
@@ -178,13 +178,13 @@ message gets injected mid-turn instead). PreToolUse gets
 The queue entries are an undocumented transcript format, so the tests pin
 it with a fixture and the fallback keyword stays.
 
-All agent-pause commands set `disable-model-invocation: true`: in Spike 2 a
+All checkpoint commands set `disable-model-invocation: true`: in Spike 2 a
 paused subagent tried to call the resume command through the Skill tool to
 unpause itself.
 
 ### State
 
-`${XDG_STATE_HOME:-~/.local/state}/agent-pause/`:
+`${XDG_STATE_HOME:-~/.local/state}/checkpoint/`:
 
 ```
 paused-all                 global flag (exists = paused)
@@ -202,12 +202,12 @@ can find it.
 2. **PreToolUse (matcher `*`)** on every tool call. This runs constantly, so a
    **shell pre-filter** checks only for a flag file or a queued pause
    command in the transcript tail, and exits immediately if neither (no
-   Python startup; same trick as net-gateway's `prompt.sh`).
+   Python startup; same trick as gateway's `prompt.sh`).
 3. When paused, it **denies** the call with a reason like: *"Paused by the
    user. Update TRACKER.md (Now, Jobs, Resume notes); you may use the job
    tools; then end your turn with one line."* Allowed through: Write/Edit to
    `.work/**`, Read/Glob/Grep, and the job status/tail/stop tools. Everything else is denied,
-   including Skill calls to agent-pause's own commands. The model sees the
+   including Skill calls to checkpoint's own commands. The model sees the
    reason as `PreToolUse:<Tool> hook error: <reason>` and, in the spikes,
    ended its turn on the first deny.
 4. After several denied calls (agent not cooperating), return **deny plus**
@@ -331,7 +331,7 @@ enqueue/dequeue/remove as a FIFO fixed it.
 reading the queue from the transcript; the plain `pause` keyword stays as a
 documented-API fallback.
 
-**Desktop app UI, checked live after the build:** `/agent-pause:pause`
+**Desktop app UI, checked live after the build:** `/check:pause`
 typed into a busy desktop session was queued at once (02:26:41.1) and the
 gate paused at the next tool call (02:26:43.7).
 
@@ -416,7 +416,7 @@ submits text. Not needed now that a typed slash command works mid-turn.
 ## Build order (after the spikes)
 
 1. Plugin skeleton: marketplace, plugin.json, pixi.toml (Python 3.12 only),
-   `run.py`, test script. Mirror net-gateway's layout.
+   `run.py`, test script. Mirror gateway's layout.
 2. Tracker convention: SessionStart note, template, PostToolUse nudge, Stop
    nudge.
 3. Pause/resume: flags, PreToolUse gate with shell pre-filter (deny +
@@ -425,12 +425,12 @@ submits text. Not needed now that a typed slash command works mid-turn.
    plain `pause` fallback, resume injection.
 4. Jobs MCP server.
 5. `pause now` (process finding and killing).
-6. `status`, `install.py` (mirror net-gateway's), README, `/agent-pause:help`.
+6. `status`, `install.py` (mirror gateway's), README, `/check:help`.
 
 ## Constraints
 
 - Requirements: **Claude Code and pixi only**, self-contained like
-  net-gateway: pixi.toml pins Python 3.12, every hook and the MCP server run
+  gateway: pixi.toml pins Python 3.12, every hook and the MCP server run
   through `pixi run --manifest-path ${CLAUDE_PLUGIN_ROOT}/pixi.toml --frozen`,
   and the only thing outside pixi is the POSIX `sh` pre-filter. No system
   Python, jq or other tools. Python stdlib only; macOS and Linux (desktop and
@@ -438,8 +438,8 @@ submits text. Not needed now that a typed slash command works mid-turn.
 - PreToolUse runs on every tool call: keep the not-paused path to a file
   existence check in shell.
 - Hooks must **fail open** for the gate (a broken hook must not freeze every
-  session), unlike net-gateway's prompt hook.
+  session), unlike gateway's prompt hook.
 - Never delete or rewrite a user's tracker content; only the agent edits it,
   and hooks only read it (and write `checkpoint.json`).
-- Coexists with net-gateway (both have PreToolUse hooks; order doesn't
+- Coexists with gateway (both have PreToolUse hooks; order doesn't
   matter, any deny wins).

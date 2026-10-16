@@ -1,7 +1,7 @@
 """Hook entry points, run via run.py after hooks/fast.sh decides Python is needed.
 
 session_main -> SessionStart: record the session, inject the tracker/jobs note.
-prompt_main  -> UserPromptSubmit: /agent-pause:* commands and the plain `pause`
+prompt_main  -> UserPromptSubmit: /check:* commands and the plain `pause`
                 keyword; any other user message in a paused session resumes it.
 gate_main    -> PreToolUse(*): pause on a queued command; deny while paused.
 post_main    -> PostToolUse(*): tracker reminder every N tool calls.
@@ -22,10 +22,10 @@ from typing import Any
 from . import core, procs, state, tracker, transcript
 
 SESSION_NOTE = """\
-agent-pause is on. Work so that you can be paused at any tool call and resumed later, possibly in a new session:
+checkpoint is on. Work so that you can be paused at any tool call and resumed later, possibly in a new session:
 - Tracker: for any task with more than a few steps, keep <cwd>/{work}/<task-slug>/TRACKER.md (template below). Create it as soon as the task clearly has several steps, put this session's id after "Session:", keep the Now section current, and update a stage's status when it changes. Put long detail in linked stage docs, not in the tracker.
 - Mark a stage "accepted" only when the user says so in chat.
-- Anything likely to run more than ~2 minutes goes through the agent-pause job_start tool (it survives pauses and new sessions), with a row in the tracker's Jobs table and a redo_hint.
+- Anything likely to run more than ~2 minutes goes through the checkpoint job_start tool (it survives pauses and new sessions), with a row in the tracker's Jobs table and a redo_hint.
 - If a tool call is denied with "Paused by the user", don't start new work: bring the tracker up to date (Write/Edit to it are allowed), then end your turn with one line saying you're paused.
 This session's id: {sid}
 Tracker template:
@@ -62,7 +62,7 @@ def _note_session(payload: dict[str, Any]) -> str:
         if payload.get(k) and sess.get(k) != payload[k]:
             fields[k] = payload[k]
     if not sess.get("claude_pid"):
-        fields["claude_pid"] = procs.find_claude(int(os.environ.get("AGENT_PAUSE_HOOK_PPID") or os.getppid()))
+        fields["claude_pid"] = procs.find_claude(int(os.environ.get("CHECKPOINT_HOOK_PPID") or os.getppid()))
     if fields:
         state.update_session(sid, **fields)
     return sid
@@ -76,7 +76,7 @@ def session_main() -> int:
     if not sid:
         return 0
     try:
-        claude_pid = procs.find_claude(int(os.environ.get("AGENT_PAUSE_HOOK_PPID") or os.getppid()))
+        claude_pid = procs.find_claude(int(os.environ.get("CHECKPOINT_HOOK_PPID") or os.getppid()))
         state.update_session(sid, cwd=payload.get("cwd") or os.getcwd(),
                              transcript_path=payload.get("transcript_path") or "",
                              claude_pid=claude_pid, source=payload.get("source") or "",
@@ -90,10 +90,10 @@ def session_main() -> int:
         if open_tasks:
             text += "\nUnfinished tasks in this project (trackers): " + "; ".join(
                 f'{t["slug"]} ({len(t["open"])} open stage(s))' for t in open_tasks[:10])
-            text += ". If the user wants to continue one, they can run /agent-pause:resume <task>."
+            text += ". If the user wants to continue one, they can run /check:resume <task>."
         _emit(_ctx("SessionStart", text))
     except Exception as e:  # noqa: BLE001
-        print(f"agent-pause: SessionStart failed: {e}", file=sys.stderr)
+        print(f"checkpoint: SessionStart failed: {e}", file=sys.stderr)
     return 0
 
 
@@ -117,19 +117,19 @@ def handle_prompt(payload: dict[str, Any]) -> dict[str, Any] | None:
         if name == "pause":
             plain = not prompt.strip().startswith("/")
             result = core.pause(sid, args, by="keyword" if plain else "command")
-            text = f"<agent-pause-result>{result}</agent-pause-result>"
+            text = f"<checkpoint-result>{result}</checkpoint-result>"
             if plain:
                 text += ("\nThe user typed 'pause': don't start anything new. Bring the tracker "
                          "up to date, then end your turn with one line saying you're paused.")
             return _ctx("UserPromptSubmit", text)
         if name == "status":
-            return _ctx("UserPromptSubmit", f"<agent-pause-result>{core.status_text()}</agent-pause-result>")
+            return _ctx("UserPromptSubmit", f"<checkpoint-result>{core.status_text()}</checkpoint-result>")
         if name == "resume":
             return _ctx("UserPromptSubmit", _resume(sid, cwd, args))
         return None  # help: the command's own prompt answers it
     if state.is_paused(sid):
         return _ctx("UserPromptSubmit", core.resume_here(sid),
-                    systemMessage="agent-pause: resumed this session.")
+                    systemMessage="checkpoint: resumed this session.")
     return None
 
 
@@ -143,31 +143,31 @@ def _resume(sid: str, cwd: str, args: list[str]) -> str:
             body = ""
         msg = ("Pause-all cleared. Other paused sessions resume when you send each one a message."
                if was else "Pause-all wasn't on.")
-        return f"<agent-pause-result>{msg}</agent-pause-result>\n{body}".strip()
+        return f"<checkpoint-result>{msg}</checkpoint-result>\n{body}".strip()
     if args:
         if state.is_paused(sid):
             state.clear_paused(sid)
         ctx = core.resume_task(cwd, args[0])
-        if ctx.startswith("<agent-pause-resume>"):
+        if ctx.startswith("<checkpoint-resume>"):
             t = tracker.by_slug(cwd, args[0])
             state.update_session(sid, task=t["slug"] if t else args[0])
             return ctx + f"\nYou are picking up this task in a new session: write this session's id ({sid}) after 'Session:' in the tracker."
-        return f"<agent-pause-result>{ctx}</agent-pause-result>"
+        return f"<checkpoint-result>{ctx}</checkpoint-result>"
     if state.is_paused(sid):
         return core.resume_here(sid)
     open_tasks = [tracker.info(t) for t in tracker.trackers(cwd)] if cwd else []
     names = ", ".join(t["slug"] for t in open_tasks if t["open"])
     msg = "This session wasn't paused."
     if names:
-        msg += f" Unfinished trackers here: {names} (/agent-pause:resume <task> picks one up)."
-    return f"<agent-pause-result>{msg}</agent-pause-result>"
+        msg += f" Unfinished trackers here: {names} (/check:resume <task> picks one up)."
+    return f"<checkpoint-result>{msg}</checkpoint-result>"
 
 
 def prompt_main() -> int:
     try:
         _emit(handle_prompt(_payload()))
     except Exception as e:  # noqa: BLE001
-        print(f"agent-pause: prompt hook failed: {e}", file=sys.stderr)
+        print(f"checkpoint: prompt hook failed: {e}", file=sys.stderr)
     return 0
 
 
@@ -234,14 +234,14 @@ def gate(payload: dict[str, Any]) -> dict[str, Any] | None:
     cwd = payload.get("cwd") or sess.get("cwd") or ""
     t = tracker.for_session(cwd, sid) if cwd else None
     if payload.get("agent_id"):
-        reason = ("Paused by the user (agent-pause). Don't call more tools: stop here and "
+        reason = ("Paused by the user (checkpoint). Don't call more tools: stop here and "
                   "return a short report of what you did and what is left.")
     elif t:
-        reason = (f"Paused by the user (agent-pause). Don't start new work. Update {t['path']} "
+        reason = (f"Paused by the user (checkpoint). Don't start new work. Update {t['path']} "
                   "(Now, Jobs, Resume notes; Write/Edit to it are allowed), then end your "
                   "turn with one line saying you're paused.")
     else:
-        reason = ("Paused by the user (agent-pause). Don't start new work. If this task has "
+        reason = ("Paused by the user (checkpoint). Don't start new work. If this task has "
                   f"several steps, write {tracker.work_dir(cwd or '.')}/<task-slug>/TRACKER.md "
                   "(what's done, Now, next action; Write is allowed there), then end your "
                   "turn with one line saying you're paused.")
@@ -251,7 +251,7 @@ def gate(payload: dict[str, Any]) -> dict[str, Any] | None:
     if count > int(cfg["max_denies"]):
         # continue:false alone would let the tool run (Spike 3): keep the deny.
         out["continue"] = False
-        out["stopReason"] = "Paused by agent-pause. Send any message to resume."
+        out["stopReason"] = "Paused by checkpoint. Send any message to resume."
     return out
 
 
@@ -259,7 +259,7 @@ def gate_main() -> int:
     try:
         _emit(gate(_payload()))
     except Exception as e:  # noqa: BLE001
-        print(f"agent-pause: gate failed open: {e}", file=sys.stderr)
+        print(f"checkpoint: gate failed open: {e}", file=sys.stderr)
     return 0
 
 
@@ -276,12 +276,12 @@ def post(payload: dict[str, Any]) -> dict[str, Any] | None:
     n = state.load_config()["nudge_every"]
     t = tracker.for_session(cwd, sid) if cwd else None
     if t:
-        return _ctx("PostToolUse", f"agent-pause: {n}+ tool calls since {t['path']} was last "
+        return _ctx("PostToolUse", f"checkpoint: {n}+ tool calls since {t['path']} was last "
                     "updated. Bring its Now section (and stage statuses) up to date.")
     sess = state.load_session(sid)
     if not sess.get("nudged_no_tracker"):
         state.update_session(sid, nudged_no_tracker=True)
-        return _ctx("PostToolUse", f"agent-pause: {n}+ tool calls and no tracker. If this "
+        return _ctx("PostToolUse", f"checkpoint: {n}+ tool calls and no tracker. If this "
                     f"task has several steps, start {tracker.work_dir(cwd or '.')}/<task-slug>/TRACKER.md.")
     return None
 
@@ -290,7 +290,7 @@ def post_main() -> int:
     try:
         _emit(post(_payload()))
     except Exception as e:  # noqa: BLE001
-        print(f"agent-pause: post hook failed: {e}", file=sys.stderr)
+        print(f"checkpoint: post hook failed: {e}", file=sys.stderr)
     return 0
 
 
@@ -318,7 +318,7 @@ def stop(payload: dict[str, Any]) -> dict[str, Any] | None:
     if tools_this_turn == 0 or t["mtime"] >= turn_start:
         return None
     return {"decision": "block",
-            "reason": (f"agent-pause: before you stop, update {t['path']}: the Now section "
+            "reason": (f"checkpoint: before you stop, update {t['path']}: the Now section "
                        "(current step, next action) and any stage whose status changed. Then stop.")}
 
 
@@ -326,7 +326,7 @@ def stop_main() -> int:
     try:
         _emit(stop(_payload()))
     except Exception as e:  # noqa: BLE001
-        print(f"agent-pause: stop hook failed: {e}", file=sys.stderr)
+        print(f"checkpoint: stop hook failed: {e}", file=sys.stderr)
     return 0
 
 

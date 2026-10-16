@@ -1,4 +1,4 @@
-"""Trackers: <cwd>/.work/<task>/TRACKER.md (AGENT_PAUSE_WORK_DIR), kept by the agent.
+"""Trackers: <cwd>/.work/<task>/TRACKER.md (CHECKPOINT_WORK_DIR), kept by the agent.
 
 Hooks only read trackers (and write checkpoint.json next to them); they never
 change what the agent or the user wrote.

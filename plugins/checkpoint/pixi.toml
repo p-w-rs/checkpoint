@@ -1,9 +1,9 @@
-# Self-contained runtime for the agent-pause plugin.
+# Self-contained runtime for the checkpoint plugin.
 # Recipients need only Claude Code + pixi; pixi provides the Python below, so
 # no system install is required. All plugin code is pure standard library;
 # the only thing outside pixi is the POSIX sh pre-filter in hooks/fast.sh.
 [workspace]
-name = "agent-pause"
+name = "checkpoint"
 channels = ["conda-forge"]
 platforms = ["osx-arm64", "osx-64", "linux-64", "linux-aarch64"]
 

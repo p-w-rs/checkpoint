@@ -1,9 +1,9 @@
 ---
-description: Quick guide to agent-pause - pausing agents, resuming, trackers and jobs
+description: Quick guide to checkpoint - pausing agents, resuming, trackers and jobs
 disable-model-invocation: true
 ---
 
-Give the user a short guide to the agent-pause plugin from the reference
+Give the user a short guide to the checkpoint plugin from the reference
 below, about a screen: a one-line summary, the commands, then how trackers and
 jobs fit in. If their message has a question after the command, answer that
 instead. Don't call tools.
@@ -14,20 +14,20 @@ Reference:
   current step; at its next tool call it updates its tracker and stops.
   Resume in the same session, or in a new one from the tracker.
 - **Commands** (typed by you; Claude can't run them):
-  - `/agent-pause:pause`: pause this session. Works while it's busy: the
-    command waits in Claude Code's queue, and agent-pause sees it there and
+  - `/check:pause`: pause this session. Works while it's busy: the
+    command waits in Claude Code's queue, and checkpoint sees it there and
     pauses at the next tool call.
-  - `/agent-pause:pause all`: pause every session on the machine.
-  - `/agent-pause:pause now`: also stop the running command right away (within
+  - `/check:pause all`: pause every session on the machine.
+  - `/check:pause now`: also stop the running command right away (within
     ~2 s). Its stage is marked to redo. Detached jobs keep running;
     add `--stop-jobs` to stop them too.
-  - `/agent-pause:pause <session>`: pause another session (ids from status).
-  - `/agent-pause:resume`: resume this session. Any message does the same.
-  - `/agent-pause:resume all`: clear pause-all (send each session a message to
+  - `/check:pause <session>`: pause another session (ids from status).
+  - `/check:resume`: resume this session. Any message does the same.
+  - `/check:resume all`: clear pause-all (send each session a message to
     continue it).
-  - `/agent-pause:resume <task>`: in a new session, pick up a task from
+  - `/check:resume <task>`: in a new session, pick up a task from
     `.work/<task>/TRACKER.md`.
-  - `/agent-pause:status`: sessions, pause state, tasks, jobs.
+  - `/check:status`: sessions, pause state, tasks, jobs.
   - Typing just `pause` (or `pause now`, `pause all`) also works.
 - **Terminal** (no idle session to type into):
   `pixi run --manifest-path <plugin dir>/pixi.toml pause all` (also `status`,

@@ -105,7 +105,7 @@ def pause(sid: str, args: list[str], by: str) -> str:
     elif rest:
         s = state.find_session(rest[0])
         if not s:
-            return f"No single session matches '{rest[0]}'. /agent-pause:status lists them."
+            return f"No single session matches '{rest[0]}'. /check:status lists them."
         state.set_paused(s["session_id"], by, now=now)
         msgs.append(f"Pausing session {s['session_id'][:8]} at its next tool call.")
         targets = [s["session_id"]]
@@ -181,7 +181,7 @@ def _changes_since(cp: dict[str, Any], cwd: str) -> list[str]:
 
 
 def resume_context(t: dict[str, Any] | None, cp: dict[str, Any] | None, cwd: str) -> str:
-    parts = ["<agent-pause-resume>"]
+    parts = ["<checkpoint-resume>"]
     if t:
         parts.append(f"Tracker: {t['path']}")
         for sec in ("Now", "Resume notes"):
@@ -204,7 +204,7 @@ def resume_context(t: dict[str, Any] | None, cp: dict[str, Any] | None, cwd: str
                          "stage 'interrupted' and redo it from the start of the stage.")
     parts.append("Resume: check the tracker's 'Check first' items and the changes above, "
                  "then continue from 'Next action'. Keep the tracker current.")
-    parts.append("</agent-pause-resume>")
+    parts.append("</checkpoint-resume>")
     return "\n\n".join(parts)
 
 
@@ -238,7 +238,7 @@ def status_text() -> str:
     lines = []
     pa = state.paused_all()
     if pa:
-        lines.append(f"PAUSE ALL is on (since {pa.get('at', '?')}). /agent-pause:resume all clears it.")
+        lines.append(f"PAUSE ALL is on (since {pa.get('at', '?')}). /check:resume all clears it.")
     rows = []
     for s in state.all_sessions():
         sid = s["session_id"]

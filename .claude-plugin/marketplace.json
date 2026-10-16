@@ -1,15 +1,15 @@
 {
-  "name": "agent-pause",
+  "name": "checkpoint",
   "owner": {
     "name": "p-w-rs"
   },
   "metadata": {
-    "description": "Local marketplace for the agent-pause plugin."
+    "description": "Local marketplace for the checkpoint plugin."
   },
   "plugins": [
     {
-      "name": "agent-pause",
-      "source": "./plugins/agent-pause",
+      "name": "check",
+      "source": "./plugins/checkpoint",
       "description": "Pause running Claude Code agents at a clean point and resume them later, with progress trackers and detached jobs."
     }
   ]

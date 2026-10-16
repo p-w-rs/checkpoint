@@ -1,5 +1,5 @@
 {
-  "name": "agent-pause",
+  "name": "check",
   "version": "0.1.0",
   "description": "Pause agents at their next tool call (each finishes its step and updates its tracker), resume them in the same or a new session, and run long work as detached jobs that survive.",
   "author": {

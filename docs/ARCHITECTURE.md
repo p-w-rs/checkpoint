@@ -1,12 +1,12 @@
 # Architecture
 
-Hooks, an MCP server and slash commands, sharing `src/agentpause/` through
+Hooks, an MCP server and slash commands, sharing `src/checkpoint/` through
 `run.py` (pixi's Python), plus a POSIX `sh` pre-filter in front of every
 hook. Why it's built this way, and the spikes behind it: [DESIGN.md](DESIGN.md).
 
 ```
 user prompt ──▶ UserPromptSubmit ─ fast.sh ─▶ hooks.handle_prompt
-                  /agent-pause:pause|resume|status, plain "pause", or any
+                  /check:pause|resume|status, plain "pause", or any
                   message in a paused session (= resume)
 tool call ────▶ PreToolUse(*) ──── fast.sh ─▶ hooks.gate
                   flag file or queued pause in the transcript tail? else exit

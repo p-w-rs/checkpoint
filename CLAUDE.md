@@ -1,6 +1,6 @@
-# CLAUDE.md: working on agent-pause
+# CLAUDE.md: working on checkpoint
 
-The plugin (`plugins/agent-pause/`, v0.1.0) is **installed** for the user
+The plugin (`plugins/checkpoint/`, v0.1.0) is **installed** for the user
 from this checkout (edits are live in new sessions). User docs: [README.md](README.md). How it fits
 together: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Why, the user's
 decisions, and the spike findings it rests on: [docs/DESIGN.md](docs/DESIGN.md).
@@ -10,7 +10,7 @@ convention; `.work/` is gitignored here).
 ## Commands
 
 ```bash
-cd plugins/agent-pause
+cd plugins/checkpoint
 pixi run test                     # must stay green; prints "N passed, 0 failed"
 claude plugin validate .          # plugin manifest (and `claude plugin validate ../..`)
 claude --plugin-dir .             # try it in a session without installing
@@ -18,8 +18,8 @@ pixi run status                   # sessions, pause state, jobs
 pixi run install --dry-run        # what the installer would change
 ```
 
-Tests are hermetic: `AGENT_PAUSE_HOME` is a temp dir, hooks run through the
-real `hooks/fast.sh` with `AGENT_PAUSE_PYTHON` set to the test interpreter
+Tests are hermetic: `CHECKPOINT_HOME` is a temp dir, hooks run through the
+real `hooks/fast.sh` with `CHECKPOINT_PYTHON` set to the test interpreter
 (through a wrapper that counts calls, to prove the fast path skips Python),
 and process tests build their own fake Claude trees. Add a check for every
 behavior change; mutation-check the important ones.
@@ -42,19 +42,19 @@ needs a new spike.
 5. Trackers live outside `.claude/` (`.work/` by default): Claude Code asks
    before every write under `.claude/`, and no allow rule or hook lifts that.
 6. Paths in `fast.sh`/`watch.sh` and `state.py` must agree (state layout,
-   `TAIL_BYTES`, `AGENT_PAUSE_WORK_DIR`).
+   `TAIL_BYTES`, `CHECKPOINT_WORK_DIR`).
 
 ## Conventions (copied from the sister project)
 
-The user built [../net-gateway](../net-gateway) the same way, so mirror it:
-layout (`.claude-plugin/marketplace.json`, `plugins/agent-pause/` with
+The user built [../gateway](../gateway) the same way, so mirror it:
+layout (`.claude-plugin/marketplace.json`, `plugins/checkpoint/` with
 `run.py`, `src/<pkg>/`, `hooks/`, `commands/`, `tests/run_tests.py`),
 hand-rolled stdio MCP server, `pixi run test` / `pixi run install`, Python
 3.12 stdlib only, macOS and Linux. Its CLAUDE.md and docs/ARCHITECTURE.md
 explain the patterns (prompt-hook pass-through with `additionalContext`, shell
 pre-filters, hermetic tests with temp state dirs).
 
-Gotcha: net-gateway is installed in the user's sessions. Its PreToolUse hook
+Gotcha: gateway is installed in the user's sessions. Its PreToolUse hook
 blocks Bash commands whose text contains `curl`, `wget`, etc. (including commit
 messages); use `git commit -F file` if a message mentions them.
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Self-contained tests for agent-pause. Pure stdlib; run with:
+"""Self-contained tests for checkpoint. Pure stdlib; run with:
     pixi run test
-Hermetic: state goes to a temp AGENT_PAUSE_HOME, hooks run through the real
-hooks/fast.sh with AGENT_PAUSE_PYTHON pointing at this interpreter (through a
+Hermetic: state goes to a temp CHECKPOINT_HOME, hooks run through the real
+hooks/fast.sh with CHECKPOINT_PYTHON pointing at this interpreter (through a
 wrapper that counts calls), and process tests use their own fake trees.
 """
 import json
@@ -17,18 +17,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-TMP = Path(tempfile.mkdtemp(prefix="agent-pause-test-"))
-os.environ["AGENT_PAUSE_HOME"] = str(TMP / "state")
-os.environ["AGENT_PAUSE_CONFIG"] = str(TMP / "no-config.json")
-os.environ["AGENT_PAUSE_NUDGE_EVERY"] = "3"
-os.environ["AGENT_PAUSE_WATCH_INTERVAL"] = "0.2"
+TMP = Path(tempfile.mkdtemp(prefix="checkpoint-test-"))
+os.environ["CHECKPOINT_HOME"] = str(TMP / "state")
+os.environ["CHECKPOINT_CONFIG"] = str(TMP / "no-config.json")
+os.environ["CHECKPOINT_NUDGE_EVERY"] = "3"
+os.environ["CHECKPOINT_WATCH_INTERVAL"] = "0.2"
 PYCALLS = TMP / "pycalls"
 WRAP = TMP / "py.sh"
 WRAP.write_text(f'#!/bin/sh\necho "$*" >> "{PYCALLS}"\nexec "{sys.executable}" "$@"\n')
 WRAP.chmod(0o755)
-os.environ["AGENT_PAUSE_PYTHON"] = str(WRAP)
+os.environ["CHECKPOINT_PYTHON"] = str(WRAP)
 
-from agentpause import core, jobs, mcp_server, procs, state, tracker, transcript  # noqa: E402
+from checkpoint import core, jobs, mcp_server, procs, state, tracker, transcript  # noqa: E402
 
 PASS = 0
 FAIL = 0
@@ -126,14 +126,14 @@ def bash(cmd="ls", tid="tu1", **kw):
 
 # --- parsing --------------------------------------------------------------------
 print("command and keyword parsing:")
-check("/agent-pause:pause", transcript.parse_command("/agent-pause:pause") == ("pause", []))
-check("/agent-pause:pause now --stop-jobs",
-      transcript.parse_command("/agent-pause:pause now --stop-jobs") == ("pause", ["now", "--stop-jobs"]))
+check("/check:pause", transcript.parse_command("/check:pause") == ("pause", []))
+check("/check:pause now --stop-jobs",
+      transcript.parse_command("/check:pause now --stop-jobs") == ("pause", ["now", "--stop-jobs"]))
 check("keyword 'pause'", transcript.parse_command(" Pause! ") == ("pause", []))
 check("keyword 'pause all now'", transcript.parse_command("pause all now") == ("pause", ["all", "now"]))
 check("a sentence is not a keyword", transcript.parse_command("pause the video then continue") is None)
-check("other plugin command ignored", transcript.parse_command("/net-gateway:secret list") is None)
-check("/agent-pause:resume build", transcript.parse_command("/agent-pause:resume build") == ("resume", ["build"]))
+check("other plugin command ignored", transcript.parse_command("/gate:secret list") is None)
+check("/check:resume build", transcript.parse_command("/check:resume build") == ("resume", ["build"]))
 
 print("transcript queue replay (format pinned from Spike 1):")
 SPIKE = [
@@ -143,11 +143,11 @@ SPIKE = [
     '{"type":"queue-operation","operation":"remove","timestamp":"2026-10-16T00:52:41.378Z","sessionId":"a205","content":"Note from the user"}',
 ]
 check("consumed and removed entries leave nothing pending", transcript.pending_queue(SPIKE) == [])
-q = [SPIKE[0].replace("/spike-pause", "/agent-pause:pause now")]
+q = [SPIKE[0].replace("/spike-pause", "/check:pause now")]
 hit = transcript.queued_pause(q)
 check("pending pause found with args", hit is not None and hit[1] == ["now"])
 check("FIFO: dequeue pops the oldest", transcript.pending_queue(
-    [q[0], q[0].replace("now", "all"), SPIKE[1]])[0]["content"] == "/agent-pause:pause all")
+    [q[0], q[0].replace("now", "all"), SPIKE[1]])[0]["content"] == "/check:pause all")
 check("recent tool calls from the transcript",
       transcript.recent_tool_calls(transcript.tail_lines(TRANSCRIPT))[0]["input"] == "python train.py --epochs 3")
 
@@ -178,7 +178,7 @@ for _ in range(2):
 check("PostToolUse below the nudge count: Python not started", pycalls() == n0)
 check("ordinary prompt: Python not started",
       hook("UserPromptSubmit", base(prompt="please continue")) is None and pycalls() == n0)
-for f in Path(os.environ["AGENT_PAUSE_HOME"]).joinpath("running").glob("*.json"):
+for f in Path(os.environ["CHECKPOINT_HOME"]).joinpath("running").glob("*.json"):
     f.unlink()  # watchers started above exit on their own
 
 print("PostToolUse tracker reminder:")
@@ -191,8 +191,8 @@ hook("PostToolUse", base(tool_name="Edit", tool_use_id="e1",
 check("a tracker write resets the counter", state.p("count", state.safe_id(SID)).read_text().strip() == "0")
 
 print("pause by command while idle:")
-out = hook("UserPromptSubmit", base(prompt="/agent-pause:pause"))
-check("command handled, result attached", "<agent-pause-result>Paused" in ctx(out))
+out = hook("UserPromptSubmit", base(prompt="/check:pause"))
+check("command handled, result attached", "<checkpoint-result>Paused" in ctx(out))
 check("flag file set", state.p("flags", state.safe_id(SID)).exists())
 out = hook("PreToolUse", bash("rm -rf build"))
 check("Bash denied while paused", denied(out))
@@ -208,10 +208,10 @@ check("Write elsewhere denied", denied(hook("PreToolUse", base(
 check("../ escape out of the work dir denied", denied(hook("PreToolUse", base(
     tool_name="Write", tool_input={"file_path": str(PROJ / ".work/../x.py")}))))
 check("Read allowed", hook("PreToolUse", base(tool_name="Read", tool_input={"file_path": "/etc/hosts"})) is None)
-check("job_status allowed", hook("PreToolUse", base(tool_name="mcp__plugin_agent-pause_jobs__job_status")) is None)
-check("job_start denied", denied(hook("PreToolUse", base(tool_name="mcp__plugin_agent-pause_jobs__job_start"))))
+check("job_status allowed", hook("PreToolUse", base(tool_name="mcp__plugin_check_jobs__job_status")) is None)
+check("job_start denied", denied(hook("PreToolUse", base(tool_name="mcp__plugin_check_jobs__job_start"))))
 check("Skill (e.g. the resume command) denied", denied(hook("PreToolUse", base(
-    tool_name="Skill", tool_input={"skill": "agent-pause:resume"}))))
+    tool_name="Skill", tool_input={"skill": "check:resume"}))))
 out = hook("PreToolUse", bash())
 check("after max denies: deny AND continue:false", denied(out) and out.get("continue") is False)
 out = hook("PreToolUse", base(tool_name="Bash", tool_input={"command": "ls"}, agent_id="sub1", agent_type="general-purpose"))
@@ -228,23 +228,23 @@ print("non-user prompts don't resume:")
 check("task notification ignored", hook("UserPromptSubmit", base(
     prompt="<task-notification>\n<task-id>x</task-id>")) is None and state.is_paused(SID))
 check("queued pause re-run at turn end: already paused", "Already paused" in ctx(
-    hook("UserPromptSubmit", base(prompt="/agent-pause:pause"))))
+    hook("UserPromptSubmit", base(prompt="/check:pause"))))
 
 print("resume by any message:")
 out = hook("UserPromptSubmit", base(prompt="ok I'm back, carry on"))
 check("resumed, flag cleared", not state.is_paused(SID) and not state.p("flags", state.safe_id(SID)).exists())
 check("resume context has Now and Resume notes",
-      "<agent-pause-resume>" in ctx(out) and "check the loss curve" in ctx(out) and "Check first" in ctx(out))
+      "<checkpoint-resume>" in ctx(out) and "check the loss curve" in ctx(out) and "Check first" in ctx(out))
 check("user sees a 'resumed' line", "resumed" in (out or {}).get("systemMessage", ""))
 check("tools allowed again", hook("PreToolUse", bash()) is None)
 
 print("pause from the queue (typed while busy):")
-enqueue("/agent-pause:pause", "2026-10-16T02:00:00.000Z")
+enqueue("/check:pause", "2026-10-16T02:00:00.000Z")
 out = hook("PreToolUse", bash(tid="tu2"))
-check("queued /agent-pause:pause: next tool call denied", denied(out))
+check("queued /check:pause: next tool call denied", denied(out))
 check("session paused by the queued command", state.load_session(SID).get("paused_by") == "queued command")
 dequeue("2026-10-16T02:00:05.000Z")
-out = hook("UserPromptSubmit", base(prompt="/agent-pause:pause"))   # it runs when the turn ends
+out = hook("UserPromptSubmit", base(prompt="/check:pause"))   # it runs when the turn ends
 check("(a) its echo says it already took effect while busy", "took effect at the next tool call" in ctx(out))
 hook("UserPromptSubmit", base(prompt="continue"))
 n0 = pycalls()
@@ -255,7 +255,7 @@ for f in state.p("running").glob("*.json"):
     f.unlink()
 
 print("resume after another session took the tracker over (d):")
-hook("UserPromptSubmit", base(prompt="/agent-pause:pause"))
+hook("UserPromptSubmit", base(prompt="/check:pause"))
 hook("PreToolUse", bash(tid="tu5"))   # first deny writes the checkpoint, records task
 _orig = TRK.read_text()
 TRK.write_text(_orig.replace("Session: sess-aaaa1111", "Session: other-session-9999 (earlier: sess-aaaa1111)")
@@ -269,22 +269,22 @@ for f in state.p("running").glob("*.json"):
 print("plain keyword:")
 out = hook("UserPromptSubmit", base(prompt="pause"))
 check("'pause' pauses and tells the agent to stop", state.is_paused(SID) and "end your turn" in ctx(out))
-hook("UserPromptSubmit", base(prompt="/agent-pause:resume"))
-check("/agent-pause:resume resumes", not state.is_paused(SID))
+hook("UserPromptSubmit", base(prompt="/check:resume"))
+check("/check:resume resumes", not state.is_paused(SID))
 
 print("pause all / resume all:")
 SID2 = "sess-bbbb"
 state.update_session(SID2, cwd=str(PROJ))
-out = hook("UserPromptSubmit", base(prompt="/agent-pause:pause all"))
+out = hook("UserPromptSubmit", base(prompt="/check:pause all"))
 check("pause all: both sessions paused", state.is_paused(SID) and state.is_paused(SID2))
 hook("UserPromptSubmit", base(session_id=SID2, prompt="hi again"))
 check("a message resumes only that session", not state.is_paused(SID2) and state.is_paused(SID))
-hook("UserPromptSubmit", base(prompt="/agent-pause:resume all"))
+hook("UserPromptSubmit", base(prompt="/check:resume all"))
 check("resume all clears the global flag", state.paused_all() is None and not state.is_paused(SID))
 
 print("status:")
-out = hook("UserPromptSubmit", base(prompt="/agent-pause:status"))
-check("status result attached", "<agent-pause-result>" in ctx(out))
+out = hook("UserPromptSubmit", base(prompt="/check:status"))
+check("status result attached", "<checkpoint-result>" in ctx(out))
 
 print("Stop nudge:")
 hook("UserPromptSubmit", base(prompt="do the next bit"))
@@ -300,10 +300,10 @@ check("a turn with no tool calls: no block", hook("Stop", base(stop_hook_active=
 
 print("resume <task> in a new session:")
 SID3 = "sess-cccc"
-out = hook("UserPromptSubmit", base(session_id=SID3, prompt="/agent-pause:resume train-model"))
+out = hook("UserPromptSubmit", base(session_id=SID3, prompt="/check:resume train-model"))
 check("context from the tracker and checkpoint", "check the loss curve" in ctx(out)
       and "Checkpoint at pause" in ctx(out) and SID3 in ctx(out))
-out = hook("UserPromptSubmit", base(session_id=SID3, prompt="/agent-pause:resume nope"))
+out = hook("UserPromptSubmit", base(session_id=SID3, prompt="/check:resume nope"))
 check("unknown task: lists trackers", "train-model" in ctx(out))
 
 # --- jobs ----------------------------------------------------------------------------
@@ -332,7 +332,7 @@ print("jobs started by another, still-running process (test 5 bug):")
 STARTER = f"""
 import sys, time
 sys.path.insert(0, {str(ROOT / "src")!r})
-from agentpause import jobs
+from checkpoint import jobs
 jobs.start("orphan", argv=["sleep", "30"], cwd={str(PROJ)!r}, redo_hint="", session_id="other")
 print("started", flush=True)
 time.sleep(20)   # stays alive and never reaps, like an open session's MCP server
@@ -364,7 +364,7 @@ msgs = [
 p = subprocess.run([sys.executable, str(ROOT / "run.py"), "server"], input="\n".join(json.dumps(m) for m in msgs) + "\n",
                    capture_output=True, text=True, env=env, timeout=30)
 resp = {r["id"]: r for r in map(json.loads, p.stdout.splitlines())}
-check("initialize", resp[1]["result"]["serverInfo"]["name"] == "agent-pause")
+check("initialize", resp[1]["result"]["serverInfo"]["name"] == "checkpoint")
 check("four job tools", sorted(t["name"] for t in resp[2]["result"]["tools"]) == ["job_start", "job_status", "job_stop", "job_tail"])
 check("job_start via MCP records the session", jobs.find("mcpjob")["session_id"] == "mcp-sess"
       and not resp[3]["result"]["isError"])
@@ -433,7 +433,7 @@ check("watcher's running file written", state.p("running", "tuW.json").exists())
 time.sleep(0.5)
 with open(TW, "a") as f:
     f.write(json.dumps({"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-16T03:00:00.000Z",
-                        "sessionId": SIDW, "content": "/agent-pause:pause now"}, separators=(",", ":")) + "\n")
+                        "sessionId": SIDW, "content": "/check:pause now"}, separators=(",", ":")) + "\n")
 deadline = time.time() + 10
 while time.time() < deadline and procs.foreground_shells(fake2.pid, CMD2):
     time.sleep(0.2)
@@ -441,7 +441,7 @@ check("queued 'pause now' kills the running command", not procs.foreground_shell
 check("...and pauses the session", state.is_paused(SIDW))
 hook("PostToolUseFailure", payload)
 check("PostToolUseFailure removes the running file", not state.p("running", "tuW.json").exists())
-out = hook("UserPromptSubmit", {"session_id": SIDW, "cwd": str(PROJ), "prompt": "/agent-pause:pause now"})
+out = hook("UserPromptSubmit", {"session_id": SIDW, "cwd": str(PROJ), "prompt": "/check:pause now"})
 check("(a) queued 'pause now' echo names the killed command", "Stopped then: `sleep 32" in ctx(out)
       and "No command was running" not in ctx(out))
 state.update_session(SIDW, checkpoint=str(core.write_checkpoint(SIDW)))

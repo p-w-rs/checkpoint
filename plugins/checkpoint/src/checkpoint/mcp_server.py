@@ -1,7 +1,7 @@
-"""Minimal MCP stdio server for agent-pause jobs, pure standard library.
+"""Minimal MCP stdio server for checkpoint jobs, pure standard library.
 
 Implements just enough of the Model Context Protocol (initialize, tools/list,
-tools/call, ping) to expose the job tools. Same shape as net-gateway's.
+tools/call, ping) to expose the job tools. Same shape as gateway's.
 """
 from __future__ import annotations
 
@@ -118,7 +118,7 @@ class Server:
             self.result(rid, {
                 "protocolVersion": asked if asked in SUPPORTED_VERSIONS else PROTOCOL_VERSION,
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "agent-pause", "version": __version__},
+                "serverInfo": {"name": "checkpoint", "version": __version__},
             })
         elif method == "notifications/initialized":
             pass

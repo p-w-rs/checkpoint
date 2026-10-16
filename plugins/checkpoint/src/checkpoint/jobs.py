@@ -73,7 +73,7 @@ def start(name: str, command: str | None = None, argv: list[str] | None = None,
         # tell our process from an unrelated one that reused the pid.
         wrapper = '/bin/sh -c "$1"; rc=$?; echo $rc > "$2"; exit $rc'
         with open(log, "ab") as out:
-            proc = subprocess.Popen(["/bin/sh", "-c", wrapper, f"agent-pause-job-{jid}",
+            proc = subprocess.Popen(["/bin/sh", "-c", wrapper, f"checkpoint-job-{jid}",
                                      cmdline, str(exitf)],
                                     cwd=cwd, stdin=subprocess.DEVNULL, stdout=out,
                                     stderr=subprocess.STDOUT, start_new_session=True)

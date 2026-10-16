@@ -1,15 +1,15 @@
-# agent-pause
+# checkpoint
 
 A Claude Code plugin for pausing agents without breaking their work, so you
 can close the laptop and pick up later.
 
 Stop/Esc cuts an agent off mid-step, and closing the lid kills its commands.
-`/agent-pause:pause` doesn't interrupt anything: the agent finishes its
+`/check:pause` doesn't interrupt anything: the agent finishes its
 current step, brings its progress tracker up to date at the next tool call,
 and stops. Resume in the same session (send any message), or in a new one
 from the tracker.
 
-Sister project: [net-gateway](../net-gateway), built the same way.
+Sister project: [gateway](../gateway), built the same way.
 
 > Developing on this repo? Start with [CLAUDE.md](CLAUDE.md), then
 > [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
@@ -18,23 +18,23 @@ Sister project: [net-gateway](../net-gateway), built the same way.
 ## Commands
 
 ```
-/agent-pause:pause                  pause this session at its next tool call (works while it's busy)
-/agent-pause:pause all              pause every session on this machine
-/agent-pause:pause now              ...and stop the running command right away (within ~2 s)
-/agent-pause:pause now --stop-jobs  ...and stop this session's detached jobs too
-/agent-pause:pause <session>        pause another session (ids from status)
-/agent-pause:resume                 resume (any message does the same)
-/agent-pause:resume all             clear pause-all; send each session a message to continue it
-/agent-pause:resume <task>          in a NEW session: pick up a task from its tracker
-/agent-pause:status                 sessions, pause state, tasks, jobs
-/agent-pause:help
+/check:pause                  pause this session at its next tool call (works while it's busy)
+/check:pause all              pause every session on this machine
+/check:pause now              ...and stop the running command right away (within ~2 s)
+/check:pause now --stop-jobs  ...and stop this session's detached jobs too
+/check:pause <session>        pause another session (ids from status)
+/check:resume                 resume (any message does the same)
+/check:resume all             clear pause-all; send each session a message to continue it
+/check:resume <task>          in a NEW session: pick up a task from its tracker
+/check:status                 sessions, pause state, tasks, jobs
+/check:help
 ```
 
 Typing just `pause` (or `pause now`, `pause all`) works too. From a terminal,
 when no session is free to type into:
 
 ```bash
-pixi run --manifest-path plugins/agent-pause/pixi.toml pause all
+pixi run --manifest-path plugins/checkpoint/pixi.toml pause all
 ```
 
 (also `status`, `resume all`, `pause <session>`).
@@ -66,25 +66,25 @@ Needs only [Claude Code](https://code.claude.com) and
 [pixi](https://pixi.sh). macOS and Linux.
 
 ```bash
-git clone https://github.com/p-w-rs/agent-pause.git
-cd agent-pause/plugins/agent-pause
+git clone https://github.com/p-w-rs/checkpoint.git
+cd checkpoint/plugins/checkpoint
 pixi run install --dry-run   # show what would change
 pixi run install             # register the plugin, allow the job tools in settings.json
 ```
 
-The installer registers this checkout as the marketplace `agent-pause`,
+The installer registers this checkout as the marketplace `checkpoint`,
 installs the plugin, and (after showing the diff and asking) adds allow rules
 for the four job tools to your user `settings.json`, with a backup. Restart
-Claude Code, then try `/agent-pause:help`.
+Claude Code, then try `/check:help`.
 
-To try it without installing: `claude --plugin-dir plugins/agent-pause`.
+To try it without installing: `claude --plugin-dir plugins/checkpoint`.
 
 ## Settings
 
-`plugins/agent-pause/config/settings.json`: how often to remind about the
+`plugins/checkpoint/config/settings.json`: how often to remind about the
 tracker, how many denied calls before the turn is ended outright, which tools
-stay allowed while paused. Environment: `AGENT_PAUSE_HOME` (state, default
-`~/.local/state/agent-pause`), `AGENT_PAUSE_WORK_DIR` (default `.work`).
+stay allowed while paused. Environment: `CHECKPOINT_HOME` (state, default
+`~/.local/state/checkpoint`), `CHECKPOINT_WORK_DIR` (default `.work`).
 
 ## Limits
 

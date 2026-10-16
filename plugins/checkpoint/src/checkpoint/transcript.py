@@ -3,7 +3,7 @@
 Two uses:
 - Queued commands. When the user sends a message while the session is busy,
   Claude Code appends {"type":"queue-operation","operation":"enqueue",
-  "content":"/agent-pause:pause",...} at once, then "dequeue" when the turn
+  "content":"/check:pause",...} at once, then "dequeue" when the turn
   ends and it runs (or "remove" when plain text is injected mid-turn). This
   format is undocumented (DESIGN.md, Spike 1); tests pin it with a fixture.
 - Checkpoints: the last few tool calls.
@@ -17,7 +17,7 @@ from typing import Any
 
 TAIL_BYTES = 262144  # keep in sync with hooks/fast.sh
 
-COMMAND_RE = re.compile(r"^/agent-pause:(pause|resume|status|help)(?:\s+(.*))?$", re.S)
+COMMAND_RE = re.compile(r"^/check:(pause|resume|status|help)(?:\s+(.*))?$", re.S)
 KEYWORD_RE = re.compile(r"^pause(?:\s+(now|all|all\s+now|now\s+all))?[.!]?$", re.I)
 
 
@@ -37,7 +37,7 @@ def tail_lines(path: str | Path, nbytes: int = TAIL_BYTES) -> list[str]:
 
 
 def parse_command(text: str) -> tuple[str, list[str]] | None:
-    """('pause', ['now']) for '/agent-pause:pause now' or the plain keyword
+    """('pause', ['now']) for '/check:pause now' or the plain keyword
     'pause now'; None for anything else."""
     text = (text or "").strip()
     m = COMMAND_RE.match(text)
@@ -94,7 +94,7 @@ def last_pause_line(lines: list[str]) -> str:
     shell pre-filter compares this with seen/<sid> to skip Python."""
     last = ""
     for line in lines:
-        if '"queue-operation"' in line and re.search(r'agent-pause:pause|"content":"\s*[Pp]ause', line):
+        if '"queue-operation"' in line and re.search(r'check:pause|"content":"\s*[Pp]ause', line):
             last = line
     return last
 
