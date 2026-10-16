@@ -4,7 +4,7 @@ argument-hint: "[all | <task>]"
 disable-model-invocation: true
 ---
 
-The checkpoint hook has already handled this command. If an
+The checkpoint hook has already handled this command. If a
 <checkpoint-resume> block is attached, follow it: check the tracker's "Check
 first" items and the changes listed, then continue the work from "Next
 action", keeping the tracker current. If only an <checkpoint-result> block is

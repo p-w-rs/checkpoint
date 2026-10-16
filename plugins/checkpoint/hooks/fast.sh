@@ -102,7 +102,8 @@ PostToolUse|PostToolUseFailure)
 
 Stop)
     cwd=$(field cwd)
-    if paused || ls "$cwd/$work"/*/TRACKER.md >/dev/null 2>&1; then
+    if paused || ls "$cwd/$work"/*/TRACKER.md >/dev/null 2>&1 ||
+        ls "${CLAUDE_PROJECT_DIR:-$cwd}/$work"/*/TRACKER.md >/dev/null 2>&1; then
         py hook-stop
     fi
     ;;

@@ -22,6 +22,7 @@ os.environ["CHECKPOINT_HOME"] = str(TMP / "state")
 os.environ["CHECKPOINT_CONFIG"] = str(TMP / "no-config.json")
 os.environ["CHECKPOINT_NUDGE_EVERY"] = "3"
 os.environ["CHECKPOINT_WATCH_INTERVAL"] = "0.2"
+os.environ.pop("CLAUDE_PROJECT_DIR", None)  # hooks run inside Claude Code get one
 PYCALLS = TMP / "pycalls"
 WRAP = TMP / "py.sh"
 WRAP.write_text(f'#!/bin/sh\necho "$*" >> "{PYCALLS}"\nexec "{sys.executable}" "$@"\n')
@@ -203,6 +204,13 @@ check("checkpoint written next to the tracker on the first deny",
 check("checkpoint has the last tool calls", cp["last_tool_calls"][-1]["tool"] == "Bash")
 check("Edit to the tracker allowed", hook("PreToolUse", base(
     tool_name="Edit", tool_input={"file_path": str(TRK)})) is None)
+DRIFT = str(TRK.parent)  # the shell cd'd into .work/train-model
+out = hook("PreToolUse", bash(cwd=DRIFT))
+check("after a cd: deny still names the project's tracker",
+      denied(out) and str(TRK) in out["hookSpecificOutput"]["permissionDecisionReason"])
+check("after a cd: Edit to the tracker still allowed", hook("PreToolUse", base(
+    cwd=DRIFT, tool_name="Edit", tool_input={"file_path": str(TRK)})) is None)
+check("after a cd: session keeps its project folder", state.load_session(SID).get("cwd") == str(PROJ))
 check("Write elsewhere denied", denied(hook("PreToolUse", base(
     tool_name="Write", tool_input={"file_path": str(PROJ / "x.py")}))))
 check("../ escape out of the work dir denied", denied(hook("PreToolUse", base(

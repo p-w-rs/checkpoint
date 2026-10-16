@@ -59,6 +59,9 @@ def _note_session(payload: dict[str, Any]) -> str:
     sess = state.load_session(sid)
     fields: dict[str, Any] = {}
     for k in ("cwd", "transcript_path"):
+        # cwd is the session's project folder: set once, not moved by each `cd`.
+        if k == "cwd" and sess.get("cwd"):
+            continue
         if payload.get(k) and sess.get(k) != payload[k]:
             fields[k] = payload[k]
     if not sess.get("claude_pid"):
@@ -66,6 +69,25 @@ def _note_session(payload: dict[str, Any]) -> str:
     if fields:
         state.update_session(sid, **fields)
     return sid
+
+
+def _dirs(payload: dict[str, Any]) -> list[str]:
+    """Where this session's trackers live: the project folder first, then the
+    shell's current folder (payload cwd), which moves with every `cd`."""
+    sess = state.load_session(payload.get("session_id") or "") if payload.get("session_id") else {}
+    out: list[str] = []
+    for d in (os.environ.get("CLAUDE_PROJECT_DIR"), sess.get("cwd"), payload.get("cwd")):
+        if d and d not in out:
+            out.append(d)
+    return out
+
+
+def _tracker_for(payload: dict[str, Any], sid: str) -> dict[str, Any] | None:
+    for d in _dirs(payload):
+        t = tracker.for_session(d, sid)
+        if t:
+            return t
+    return None
 
 
 # -- SessionStart ---------------------------------------------------------------
@@ -77,7 +99,8 @@ def session_main() -> int:
         return 0
     try:
         claude_pid = procs.find_claude(int(os.environ.get("CHECKPOINT_HOOK_PPID") or os.getppid()))
-        state.update_session(sid, cwd=payload.get("cwd") or os.getcwd(),
+        state.update_session(sid, cwd=os.environ.get("CLAUDE_PROJECT_DIR")
+                             or payload.get("cwd") or os.getcwd(),
                              transcript_path=payload.get("transcript_path") or "",
                              claude_pid=claude_pid, source=payload.get("source") or "",
                              started=state.now_iso())
@@ -110,7 +133,7 @@ def handle_prompt(payload: dict[str, Any]) -> dict[str, Any] | None:
     prompt = payload.get("prompt") or ""
     if not sid or not _is_user_prompt(prompt, cfg):
         return None
-    cwd = payload.get("cwd") or state.load_session(sid).get("cwd") or ""
+    cwd = (_dirs(payload) or [""])[0]
     cmd = transcript.parse_command(prompt)
     if cmd:
         name, args = cmd
@@ -180,15 +203,16 @@ def allowed_while_paused(payload: dict[str, Any], cfg: dict[str, Any]) -> bool:
     if name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
         inp = payload.get("tool_input") or {}
         fp = inp.get("file_path") or inp.get("notebook_path") or ""
-        cwd = payload.get("cwd") or ""
-        if not fp or not cwd:
+        dirs = _dirs(payload)
+        if not fp or not dirs:
             return False
-        target = Path(fp) if os.path.isabs(fp) else Path(cwd) / fp
-        try:
-            target.resolve().relative_to(tracker.work_dir(cwd).resolve())
-            return True
-        except ValueError:
-            return False
+        target = (Path(fp) if os.path.isabs(fp) else Path(payload.get("cwd") or dirs[0]) / fp).resolve()
+        for d in dirs:
+            try:
+                target.relative_to(tracker.work_dir(d).resolve())
+                return True
+            except ValueError:
+                continue
     return False
 
 
@@ -231,8 +255,8 @@ def gate(payload: dict[str, Any]) -> dict[str, Any] | None:
     state.update_session(sid, deny_count=count)
     if not sess.get("checkpoint_written"):
         core.write_checkpoint(sid)
-    cwd = payload.get("cwd") or sess.get("cwd") or ""
-    t = tracker.for_session(cwd, sid) if cwd else None
+    cwd = (_dirs(payload) or [""])[0]
+    t = _tracker_for(payload, sid)
     if payload.get("agent_id"):
         reason = ("Paused by the user (checkpoint). Don't call more tools: stop here and "
                   "return a short report of what you did and what is left.")
@@ -272,9 +296,9 @@ def post(payload: dict[str, Any]) -> dict[str, Any] | None:
     state.touch(state.p("count", state.safe_id(sid)), "0")
     if state.is_paused(sid):
         return None
-    cwd = payload.get("cwd") or ""
+    cwd = (_dirs(payload) or [""])[0]
     n = state.load_config()["nudge_every"]
-    t = tracker.for_session(cwd, sid) if cwd else None
+    t = _tracker_for(payload, sid)
     if t:
         return _ctx("PostToolUse", f"checkpoint: {n}+ tool calls since {t['path']} was last "
                     "updated. Bring its Now section (and stage statuses) up to date.")
@@ -306,8 +330,7 @@ def stop(payload: dict[str, Any]) -> dict[str, Any] | None:
         return None
     if payload.get("stop_hook_active"):
         return None
-    cwd = payload.get("cwd") or ""
-    t = tracker.for_session(cwd, sid) if cwd else None
+    t = _tracker_for(payload, sid)
     if not t or not t["in_progress"]:
         return None
     try:
