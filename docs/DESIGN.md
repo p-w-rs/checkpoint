@@ -34,10 +34,10 @@ Three parts, in order of importance:
    clean stop and back.
 
 A real pause button next to Stop in the app isn't possible (plugins can't
-change the app's UI). The trigger in a **busy** session is a plain-text
-message `pause` (Spike 1: slash commands typed mid-turn wait until the turn
-ends, plain text is delivered at the next tool boundary). Slash commands
-cover idle sessions, `all`, `status` and resume.
+change the app's UI). Slash commands are the trigger, busy session or not.
+A command typed into a busy session waits in Claude Code's queue until the
+turn ends, but the queue is written to the transcript at once, so the gate
+sees it at the next tool call (Spike 1).
 
 ## 1. Tracker (always on)
 
@@ -129,8 +129,7 @@ with:
 
 | Command | Effect |
 |---|---|
-| `pause` (plain message, typed while busy) | Pause this session at its next tool call. Also `pause now`, `pause all`. Matched exactly (whole message, case-insensitive, optional `.`/`!`), so ordinary sentences never trigger it. |
-| `/agent-pause:pause` | Same, for an idle session (or as a queued command that applies when the turn ends). |
+| `/agent-pause:pause` | Pause this session at its next tool call (typed while busy; see "Queued commands" below), or right away if idle. |
 | `/agent-pause:pause all` | Pause every session on the machine. |
 | `/agent-pause:pause now` | Also kill the session's running **foreground** command right away (see below). |
 | `/agent-pause:pause now --stop-jobs` | ...and stop its detached jobs too. |
@@ -145,6 +144,34 @@ stops them.
 
 A terminal command (`pixi run pause all`) is still worth having for headless
 or remote sessions.
+
+Fallback (recommended, cheap): the plain message `pause` (also `pause now`,
+`pause all`; whole message, case-insensitive) does the same through
+UserPromptSubmit, which runs at the next tool boundary for plain text. It
+relies only on documented hook behaviour, so it keeps working if the
+queue format below changes.
+
+#### Queued commands
+
+When a session is busy, Claude Code appends
+`{"type":"queue-operation","operation":"enqueue","content":"/agent-pause:pause",...}`
+to the session transcript the moment the user presses Enter, then
+`dequeue` when the turn ends and the command runs (`remove` when a plain
+message gets injected mid-turn instead). PreToolUse gets
+`transcript_path`, so the gate:
+
+1. pre-filter (shell): flag file exists, **or** the last ~256 KB of the
+   transcript contains `/agent-pause:pause`; else exit;
+2. replays the queue ops in that tail (enqueue appends, dequeue pops the
+   front, remove drops by content); if a pending entry is a pause command
+   newer than the last one handled (timestamp kept in the session's state
+   file), it sets the flag and applies `now`/`all` options, then denies;
+3. when the turn ends, the queued command runs as normal; UserPromptSubmit
+   sees the flag is already set and does nothing more (the command's
+   prompt just has the agent confirm in one line).
+
+The queue entries are an undocumented transcript format, so the tests pin
+it with a fixture and the fallback keyword stays.
 
 All agent-pause commands set `disable-model-invocation: true`: in Spike 2 a
 paused subagent tried to call the resume command through the Skill tool to
@@ -168,9 +195,9 @@ can find it.
 
 1. The flag is set (session file `paused: true`, or `paused-all`).
 2. **PreToolUse (matcher `*`)** on every tool call. This runs constantly, so a
-   **shell pre-filter** checks only whether a flag file exists and exits
-   immediately if not (no Python startup; same trick as net-gateway's
-   `prompt.sh`).
+   **shell pre-filter** checks only for a flag file or a queued pause
+   command in the transcript tail, and exits immediately if neither (no
+   Python startup; same trick as net-gateway's `prompt.sh`).
 3. When paused, it **denies** the call with a reason like: *"Paused by the
    user. Update TRACKER.md (Now, Jobs, Resume notes); you may use the job
    tools; then end your turn with one line."* Allowed through: Write/Edit to
@@ -222,8 +249,9 @@ then sees its tool fail, hits the gate on its next call, and pauses as above.
 - Any user prompt in a paused session resumes it (the user being back is the
   signal); `/resume` is the explicit form. Not every UserPromptSubmit is the
   user, though: background-task results arrive as prompts starting with
-  `<task-notification>` (Spike 2), and the pause keywords themselves arrive
-  as prompts. Those must not resume. The UserPromptSubmit hook clears the
+  `<task-notification>` (Spike 2), and the pause commands and keywords
+  themselves arrive as prompts (a queued pause runs after the gate already
+  paused). Those must not resume. The UserPromptSubmit hook clears the
   session's flag and adds `additionalContext` with:
   - the tracker path and its Now / Resume notes sections,
   - `checkpoint.json`,
@@ -248,31 +276,53 @@ path the desktop app uses (its `claude` process runs with
 `--input-format stream-json --replay-user-messages`). Runs used Haiku.
 
 Items marked **(manual)** need a person typing into the desktop app or an
-interactive terminal: the interactive CLI can't start inside an agent's
-sandbox (it drops into first-run login). Steps are in
+interactive terminal. The interactive CLI can't start inside an agent's
+sandbox (no keychain, so it drops into login), so `spike/relay.py` runs it
+in the user's Terminal panel instead. Steps are in
 [spike/MANUAL.md](../spike/MANUAL.md).
 
 ### 1. Typing into a busy session
 
-Stream-json path (`state/s1b`, `s1c`, `s1d`): the second message was sent
-3 s into a 6-call loop of `./tick.sh 5`.
+Run through both the stream-json path (`drive_sdk.py`, `state/s1b`-`s1e`)
+and the real interactive CLI (`relay.py`, which runs `claude` in a pty
+that both the user and the agent can type into, `state/c2`). Each time the
+second message went in a few seconds into a 6-call loop of `./tick.sh 5`.
 
-| Sent mid-turn | UserPromptSubmit fired | Effect |
-|---|---|---|
-| `/spike-pause` | 18:53:17.0, **after** the turn's Stop (16.9) and after all 6 calls | too late to pause anything |
-| plain text | 18:52:41.4, right after the first PostToolUse (41.2) | delivered at the next tool boundary |
-| `pause` (hook matches it) | 18:54:02.8, after the first PostToolUse | flag set; the next PreToolUse was denied (04.8); the agent replied one line and stopped (Stop 09.4) |
+| Sent mid-turn | Path | UserPromptSubmit fired | Effect |
+|---|---|---|---|
+| `/spike-pause` | stream-json | 18:53:17.0, **after** the turn's Stop and all 6 calls | too late |
+| `/spike-pause` | CLI | 19:06:01.3, **after** Stop and all 6 calls | too late |
+| plain text | stream-json | 18:52:41.4, right after the first PostToolUse | delivered at the next tool boundary |
+| `pause` (hook matches it) | stream-json | 18:54:02.8, after the first PostToolUse | flag set; next call denied; turn ended with one line |
 
-**Finding:** slash commands wait for the turn to end; plain messages are
-injected at the next tool boundary and run UserPromptSubmit then. **Design
-change:** the mid-turn trigger is the plain message `pause` (exact match),
-and slash commands stay for idle sessions, `all`, `status` and resume. The
-desktop app also surfaces mid-turn messages "within the running turn,
-alongside the next tool result" (seen in this very session).
+So UserPromptSubmit alone can't pause on a slash command. But both paths
+write the queued command to the **transcript** at once:
 
-**(manual)** Confirm in the desktop app UI and the interactive CLI; in the
-CLI also try `chat:sendNow` (ctrl+enter) with `/spike-pause`, in case
-send-now delivers a slash command mid-turn.
+```
+{"type":"queue-operation","operation":"enqueue","content":"/spike-pause","timestamp":"...01:05:22.438Z"}   <- Enter pressed
+{"type":"queue-operation","operation":"dequeue","timestamp":"...01:06:01.167Z"}                         <- turn ended
+```
+
+With the gate reading the transcript tail (see "Queued commands"):
+
+| Sent mid-turn | Path | Typed | Next PreToolUse | Turn ended |
+|---|---|---|---|---|
+| `/spike-pause` | CLI (`c2`) | 19:08:03.7 | 19:08:09.1: flag set from queue, denied | 19:08:10.5 |
+| `/spike-pause` | stream-json (`s1e`) | 19:08:56.6 | 19:09:02.3: flag set from queue, denied | 19:09:06.5 |
+
+In the CLI it reads cleanly: "Ran 2 shell commands", "paused", then
+the queued `/spike-pause` runs and answers "pause noted". A first version
+matched an already-consumed enqueue from an earlier turn; replaying
+enqueue/dequeue/remove as a FIFO fixed it.
+
+**Finding / design:** slash commands work at the next tool boundary by
+reading the queue from the transcript; the plain `pause` keyword stays as a
+documented-API fallback.
+
+**(manual)** Not yet seen: the desktop app's own UI. Its `claude` runs the
+stream-json path tested above, but the app might hold slash commands
+client-side until the turn ends instead of sending them. Check with D1 in
+[spike/MANUAL.md](../spike/MANUAL.md).
 
 ### 2. Subagents
 
@@ -344,7 +394,7 @@ foreground.
 
 Not possible: `keybindings.json` maps keys only to built-in actions
 (`chat:submit`, `chat:queueSubmit`, `chat:sendNow`, ...), and none of them
-submits text. Typing `pause` + Enter is short enough.
+submits text. Not needed now that a typed slash command works mid-turn.
 
 ### Other notes
 
@@ -360,7 +410,8 @@ submits text. Typing `pause` + Enter is short enough.
    nudge.
 3. Pause/resume: flags, PreToolUse gate with shell pre-filter (deny +
    `continue: false`), checkpoint from the gate and Stop, prompt hook for
-   the plain `pause` keyword and the commands, resume injection.
+   the commands (queued-command detection from the transcript) and the
+   plain `pause` fallback, resume injection.
 4. Jobs MCP server.
 5. `pause now` (process finding and killing).
 6. `status`, `install.py` (mirror net-gateway's), README, `/agent-pause:help`.

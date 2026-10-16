@@ -123,7 +123,13 @@ def main():
                     os.remove(p)
             rec["action"] = "flag cleared"
 
-    elif event == "PreToolUse" and (os.path.exists(flag) or os.path.exists(flag_all)):
+    if event == "PreToolUse" and not os.path.exists(flag) and data.get("transcript_path"):
+        hit = queued_pause(data["transcript_path"], sid)
+        if hit:
+            open(flag, "w").close()
+            rec["action_queue"] = "flag set from queued %r (enqueued %s)" % (hit["content"], hit["timestamp"])
+
+    if event == "PreToolUse" and (os.path.exists(flag) or os.path.exists(flag_all)):
         cnt_path = os.path.join(STATE, "denies-" + sid)
         n = int(open(cnt_path).read() or 0) + 1 if os.path.exists(cnt_path) else 1
         with open(cnt_path, "w") as f:
@@ -153,6 +159,45 @@ def main():
     log(rec)
     if out is not None:
         print(json.dumps(out))
+
+
+def queued_pause(path, sid):
+    """Newest unhandled, unremoved enqueue of /spike-pause in the transcript tail."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 262144))
+            tail = f.read().decode("utf8", "replace")
+    except OSError:
+        return None
+    if "/spike-pause" not in tail:
+        return None
+    ops = []
+    for line in tail.splitlines():
+        if '"queue-operation"' in line:
+            try:
+                ops.append(json.loads(line))
+            except ValueError:
+                pass
+    handled_path = os.path.join(STATE, "queue-handled-" + sid)
+    handled = open(handled_path).read().strip() if os.path.exists(handled_path) else ""
+    pending = []  # replay the queue: enqueue appends, dequeue pops the front, remove drops by content
+    for op in ops:
+        kind, content = op.get("operation"), (op.get("content") or "").strip()
+        if kind == "enqueue":
+            pending.append(op)
+        elif kind == "dequeue" and pending:
+            pending.pop(0)
+        elif kind == "remove":
+            pending = [p for p in pending if (p.get("content") or "").strip() != content]
+    hit = None
+    for op in pending:
+        if (op.get("content") or "").strip().startswith("/spike-pause") and op.get("timestamp", "") > handled:
+            hit = op
+    if hit:
+        with open(handled_path, "w") as f:
+            f.write(hit["timestamp"])
+    return hit
 
 
 def kill_foreground(table, claude_pid, ch):

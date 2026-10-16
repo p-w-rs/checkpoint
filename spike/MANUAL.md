@@ -13,9 +13,11 @@ Test prompt (used below as PROMPT):
 
 Start a new Code session with folder `~/projects/hobby/agent-pause/spike/testproj`.
 
-- **D1, slash command while busy:** send PROMPT. When the first tick call
-  shows, type `/spike-pause` and press Enter. Note whether it stops after the
-  current call or runs all eight. Then send `/spike-resume`.
+- **D1, slash command while busy (the important one):** send PROMPT. When
+  the first tick call shows, type `/spike-pause` and press Enter. Expected
+  now: it stops after the current call (the gate reads the queued command
+  from the transcript). If all eight run, the app is holding slash commands
+  itself. Then send `/spike-resume`.
 - **D2, plain text while busy:** send PROMPT. While it's busy, type `pause`
   and press Enter. Expected: it stops after the current call with one line.
   Then send `/spike-resume`.
@@ -33,13 +35,11 @@ Start a new Code session with folder `~/projects/hobby/agent-pause/spike/testpro
   rm ~/projects/hobby/agent-pause/spike/state/mode ~/projects/hobby/agent-pause/spike/state/with-deny
   ```
 
-## CLI (a real terminal)
+## CLI
+
+Done by the agent through `relay.py` in the Terminal panel (see DESIGN.md,
+Spike 1). To repeat by hand:
 
 ```bash
-cd ~/projects/hobby/agent-pause/spike/testproj && claude --model haiku
+SPIKE_STATE=~/projects/hobby/agent-pause/spike/state/manual python3 ~/projects/hobby/agent-pause/spike/relay.py --model haiku
 ```
-
-- **C1:** as D1 (`/spike-pause` + Enter while busy), then `/spike-resume`.
-- **C2:** as D2 (`pause` + Enter while busy), then `/spike-resume`.
-- **C3:** send PROMPT, type `/spike-pause` and press **ctrl+enter**
-  (send now) instead of Enter. Does it pause after the current call?
