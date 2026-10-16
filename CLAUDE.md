@@ -5,7 +5,7 @@ from this checkout (edits are live in new sessions). User docs: [README.md](READ
 together: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Why, the user's
 decisions, and the spike findings it rests on: [docs/DESIGN.md](docs/DESIGN.md).
 Work in progress: `.work/<task>/TRACKER.md` (this repo uses its own tracker
-convention).
+convention; `.work/` is gitignored here).
 
 ## Commands
 
@@ -24,11 +24,12 @@ real `hooks/fast.sh` with `AGENT_PAUSE_PYTHON` set to the test interpreter
 and process tests build their own fake Claude trees. Add a check for every
 behavior change; mutation-check the important ones.
 
-`spike/` holds the throwaway prototype and drivers from the spikes:
-`relay.py` runs an interactive `claude` in a pty that both the user and an
-agent can type into (use it from the Terminal panel; inside the sandbox the
-CLI can't reach the keychain), and `drive_sdk.py` uses the stream-json input
-path the desktop app uses.
+The spike prototype and its drivers (`relay.py`: an interactive `claude` in
+a pty that both the user and an agent can type into, run from the Terminal
+panel since the sandboxed CLI can't reach the keychain; `drive_sdk.py`: the
+stream-json input path the desktop app uses) were removed after the build.
+Recover them with `git show b9420c1:spike/relay.py` etc. if a hook question
+needs a new spike.
 
 ## Invariants
 

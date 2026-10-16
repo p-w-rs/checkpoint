@@ -279,8 +279,9 @@ call, and pauses as above.
 
 ## Spikes (run 2026-10-15)
 
-Prototype in [spike/](../spike): `hook.py` logs every hook event to
-`spike/state/events.jsonl` and gates tools on a flag file; `testproj/` loads
+The throwaway prototype was removed after the build; it's in git history
+(`git show b9420c1:spike/`). `hook.py` logged every hook event to
+`spike/state/events.jsonl` and gated tools on a flag file; `testproj/` loads
 it through a project-local `.claude/settings.json` (user settings untouched);
 `drive_sdk.py` drives `claude -p --input-format stream-json`, the same input
 path the desktop app uses (its `claude` process runs with
@@ -288,9 +289,9 @@ path the desktop app uses (its `claude` process runs with
 
 Items marked **(manual)** need a person typing into the desktop app or an
 interactive terminal. The interactive CLI can't start inside an agent's
-sandbox (no keychain, so it drops into login), so `spike/relay.py` runs it
-in the user's Terminal panel instead. Steps are in
-[spike/MANUAL.md](../spike/MANUAL.md).
+sandbox (no keychain, so it drops into login), so `spike/relay.py` ran it
+in the user's Terminal panel instead. The manual steps were in
+`spike/MANUAL.md`.
 
 ### 1. Typing into a busy session
 
@@ -330,10 +331,9 @@ enqueue/dequeue/remove as a FIFO fixed it.
 reading the queue from the transcript; the plain `pause` keyword stays as a
 documented-API fallback.
 
-**(manual)** Not yet seen: the desktop app's own UI. Its `claude` runs the
-stream-json path tested above, but the app might hold slash commands
-client-side until the turn ends instead of sending them. Check with D1 in
-[spike/MANUAL.md](../spike/MANUAL.md).
+**Desktop app UI, checked live after the build:** `/agent-pause:pause`
+typed into a busy desktop session was queued at once (02:26:41.1) and the
+gate paused at the next tool call (02:26:43.7).
 
 ### 2. Subagents
 

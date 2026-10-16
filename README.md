@@ -90,8 +90,5 @@ stay allowed while paused. Environment: `AGENT_PAUSE_HOME` (state, default
 - Detecting a pause typed into a busy session relies on Claude Code writing
   queued messages to the transcript, an undocumented format. If that
   changes, typing `pause` still works (it's delivered at the next tool call).
-- Not yet checked in the desktop app's own UI: whether it passes a slash
-  command typed into a busy session straight through (the CLI and the
-  desktop's input path both do).
 - A plugin can't send messages into other sessions, so after `resume all`
   each session needs a message to continue.
