@@ -1,0 +1,19 @@
+# Self-contained runtime for the agent-pause plugin.
+# Recipients need only Claude Code + pixi; pixi provides the Python below, so
+# no system install is required. All plugin code is pure standard library;
+# the only thing outside pixi is the POSIX sh pre-filter in hooks/fast.sh.
+[workspace]
+name = "agent-pause"
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "osx-64", "linux-64", "linux-aarch64"]
+
+[dependencies]
+python = "3.12.*"
+
+[tasks]
+server = "python run.py server"
+test = "python tests/run_tests.py"
+status = "python run.py status"
+pause = "python run.py pause"           # pixi run pause all | pixi run pause <session>
+resume = "python run.py resume"         # pixi run resume all
+install = "python install.py"           # register the plugin + permission rules for this user

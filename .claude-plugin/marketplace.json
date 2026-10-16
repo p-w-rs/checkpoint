@@ -1,0 +1,16 @@
+{
+  "name": "agent-pause",
+  "owner": {
+    "name": "p-w-rs"
+  },
+  "metadata": {
+    "description": "Local marketplace for the agent-pause plugin."
+  },
+  "plugins": [
+    {
+      "name": "agent-pause",
+      "source": "./plugins/agent-pause",
+      "description": "Pause running Claude Code agents at a clean point and resume them later, with progress trackers and detached jobs."
+    }
+  ]
+}

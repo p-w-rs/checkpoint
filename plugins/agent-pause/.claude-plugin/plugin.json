@@ -1,0 +1,9 @@
+{
+  "name": "agent-pause",
+  "version": "0.1.0",
+  "description": "Pause agents at their next tool call (each finishes its step and updates its tracker), resume them in the same or a new session, and run long work as detached jobs that survive.",
+  "author": {
+    "name": "p-w-rs"
+  },
+  "keywords": ["pause", "resume", "tracker", "jobs", "hooks", "mcp"]
+}

@@ -1,0 +1,13 @@
+{
+  "_comment": "Permission rules agent-pause expects in your user settings.json. `pixi run install` merges them for you. They let Claude use the job tools without a prompt each time.",
+  "permissions": {
+    "allow": [
+      "mcp__plugin_agent-pause_jobs__job_start",
+      "mcp__plugin_agent-pause_jobs__job_status",
+      "mcp__plugin_agent-pause_jobs__job_tail",
+      "mcp__plugin_agent-pause_jobs__job_stop"
+    ],
+    "ask": [],
+    "deny": []
+  }
+}

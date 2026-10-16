@@ -1,0 +1,73 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh\" SessionStart \"${CLAUDE_PLUGIN_ROOT}\"",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh\" UserPromptSubmit \"${CLAUDE_PLUGIN_ROOT}\"",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh\" PreToolUse \"${CLAUDE_PLUGIN_ROOT}\"",
+            "timeout": 30
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh\" PostToolUse \"${CLAUDE_PLUGIN_ROOT}\"",
+            "timeout": 30
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh\" PostToolUseFailure \"${CLAUDE_PLUGIN_ROOT}\"",
+            "timeout": 30
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh\" Stop \"${CLAUDE_PLUGIN_ROOT}\"",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}
