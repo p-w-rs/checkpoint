@@ -1,5 +1,5 @@
 {
-  "_comment": "Tunables for agent-pause. Missing keys fall back to defaults in src/agentpause/state.py. The shell pre-filter reads AGENT_PAUSE_NUDGE_EVERY from the environment instead of nudge_every, and always uses .claude/work.",
+  "_comment": "Tunables for agent-pause. Missing keys fall back to defaults in src/agentpause/state.py. The shell pre-filter reads AGENT_PAUSE_NUDGE_EVERY from the environment instead of nudge_every, and AGENT_PAUSE_WORK_DIR (default .work) for the tracker folder, as does Python.",
   "nudge_every": 25,
   "max_denies": 3,
   "kill_grace_seconds": 3,

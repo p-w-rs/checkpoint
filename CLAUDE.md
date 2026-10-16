@@ -1,17 +1,47 @@
 # CLAUDE.md: working on agent-pause
 
-Nothing is built yet. Read [docs/DESIGN.md](docs/DESIGN.md) first; it records
-the user's decisions and the open questions.
+The plugin is built (`plugins/agent-pause/`, v0.1.0) but **not installed**
+in the user's settings. User docs: [README.md](README.md). How it fits
+together: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Why, the user's
+decisions, and the spike findings it rests on: [docs/DESIGN.md](docs/DESIGN.md).
+Work in progress: `.work/<task>/TRACKER.md` (this repo uses its own tracker
+convention).
 
-## Where to start
+## Commands
 
-1. Do the **spikes** in DESIGN.md first, especially Spike 1 (what happens to a
-   slash command typed while a session is busy). Use a throwaway prototype (a
-   flag file plus a PreToolUse deny hook) and write the findings into
-   DESIGN.md before building the real plugin.
-2. Then follow the build order in DESIGN.md.
-3. Use this repo's own tracker convention while you work:
-   `.claude/work/<task>/TRACKER.md`.
+```bash
+cd plugins/agent-pause
+pixi run test                     # must stay green; prints "N passed, 0 failed"
+claude plugin validate .          # plugin manifest (and `claude plugin validate ../..`)
+claude --plugin-dir .             # try it in a session without installing
+pixi run status                   # sessions, pause state, jobs
+pixi run install --dry-run        # what the installer would change
+```
+
+Tests are hermetic: `AGENT_PAUSE_HOME` is a temp dir, hooks run through the
+real `hooks/fast.sh` with `AGENT_PAUSE_PYTHON` set to the test interpreter
+(through a wrapper that counts calls, to prove the fast path skips Python),
+and process tests build their own fake Claude trees. Add a check for every
+behavior change; mutation-check the important ones.
+
+`spike/` holds the throwaway prototype and drivers from the spikes:
+`relay.py` runs an interactive `claude` in a pty that both the user and an
+agent can type into (use it from the Terminal panel; inside the sandbox the
+CLI can't reach the keychain), and `drive_sdk.py` uses the stream-json input
+path the desktop app uses.
+
+## Invariants
+
+1. The gate **fails open**: any error means no output, and the call goes ahead.
+2. The common path (not paused, nothing queued) never starts Python.
+3. Hooks never write the user's or agent's tracker text; only
+   `checkpoint.json` next to it.
+4. Deny always comes with `continue: false`, never `continue: false` alone
+   (that lets the tool run; Spike 3).
+5. Trackers live outside `.claude/` (`.work/` by default): Claude Code asks
+   before every write under `.claude/`, and no allow rule or hook lifts that.
+6. Paths in `fast.sh`/`watch.sh` and `state.py` must agree (state layout,
+   `TAIL_BYTES`, `AGENT_PAUSE_WORK_DIR`).
 
 ## Conventions (copied from the sister project)
 

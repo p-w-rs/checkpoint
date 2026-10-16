@@ -8,6 +8,7 @@
 ev=$1
 root=$2
 st=${AGENT_PAUSE_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-pause}
+work=${AGENT_PAUSE_WORK_DIR:-.work}
 input=$(cat)
 
 # First "key":"value" string in the payload (Claude Code puts session_id,
@@ -87,7 +88,7 @@ PostToolUse|PostToolUseFailure)
     echo $((t + 1)) > "$st/turn/$sid" 2>/dev/null
     # A write to a tracker resets the reminder counter.
     if printf '%s' "$input" | grep -Eq '"tool_name"[[:space:]]*:[[:space:]]*"(Write|Edit|MultiEdit)"' &&
-        printf '%s' "$input" | grep -Eq '"file_path"[[:space:]]*:[[:space:]]*"[^"]*/\.claude/work/[^"]*TRACKER\.md"'; then
+        printf '%s' "$input" | grep -Eq '"file_path"[[:space:]]*:[[:space:]]*"[^"]*TRACKER\.md"'; then
         echo 0 > "$st/count/$sid"
         exit 0
     fi
@@ -101,7 +102,7 @@ PostToolUse|PostToolUseFailure)
 
 Stop)
     cwd=$(field cwd)
-    if paused || ls "$cwd"/.claude/work/*/TRACKER.md >/dev/null 2>&1; then
+    if paused || ls "$cwd/$work"/*/TRACKER.md >/dev/null 2>&1; then
         py hook-stop
     fi
     ;;

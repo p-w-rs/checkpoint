@@ -1,4 +1,4 @@
-"""Trackers: <cwd>/.claude/work/<task>/TRACKER.md, kept by the agent.
+"""Trackers: <cwd>/.work/<task>/TRACKER.md (AGENT_PAUSE_WORK_DIR), kept by the agent.
 
 Hooks only read trackers (and write checkpoint.json next to them); they never
 change what the agent or the user wrote.
@@ -40,7 +40,7 @@ Next action: <the very next concrete thing to do>
 
 
 def work_dir(cwd: str | Path) -> Path:
-    return Path(cwd) / state.load_config()["work_dir"]
+    return Path(cwd) / state.work_dir_name()
 
 
 def trackers(cwd: str | Path) -> list[Path]:
@@ -78,7 +78,7 @@ def info(path: Path) -> dict[str, Any]:
     d["slug"] = path.parent.name
     d["mtime"] = path.stat().st_mtime if path.exists() else 0
     d["in_progress"] = [s for s in d["stages"] if s["status"].startswith("in progress")]
-    d["open"] = [s for s in d["stages"] if s["status"] not in ("done", "accepted")]
+    d["open"] = [s for s in d["stages"] if not s["status"].startswith(("done", "accepted"))]
     return d
 
 

@@ -1,9 +1,10 @@
 # agent-pause: design
 
-Status: **design only, nothing built yet** (2026-10-15). Spikes run
-2026-10-15 on Claude Code 2.1.277 (CLI) / 2.1.295 (desktop); see the Spikes section. Written from a planning
-conversation with the user; decisions below are theirs unless marked
-"recommended".
+Status: **built, not installed** (v0.1.0, 2026-10-15); see
+[ARCHITECTURE.md](ARCHITECTURE.md). Spikes run 2026-10-15 on Claude Code
+2.1.277 (CLI) / 2.1.295 (desktop); see the Spikes section. Written from a
+planning conversation with the user; decisions below are theirs unless
+marked "recommended".
 
 ## The problem
 
@@ -44,13 +45,17 @@ sees it at the next tool call (Spike 1).
 For any task with more than a few steps, the agent keeps:
 
 ```
-<project>/.claude/work/<task-slug>/
+<project>/.work/<task-slug>/
   TRACKER.md          the source of truth (template below)
   <stage>.md ...      optional detail docs, linked from TRACKER.md
   checkpoint.json     facts written by the hook at pause time
 ```
 
-Decided: this location is fine (committable, or gitignored per project).
+Decided: this location (committable, or gitignored per project). First
+planned as `.claude/work/`, but Claude Code treats every path under
+`.claude/` as sensitive and asks before each write; neither an allow rule
+(`Write(.claude/work/**)`) nor a PreToolUse `allow` from a hook lifts that
+(checked live). So the user chose `.work/`; `AGENT_PAUSE_WORK_DIR` changes it.
 
 `TRACKER.md` template:
 
@@ -201,7 +206,7 @@ can find it.
 3. When paused, it **denies** the call with a reason like: *"Paused by the
    user. Update TRACKER.md (Now, Jobs, Resume notes); you may use the job
    tools; then end your turn with one line."* Allowed through: Write/Edit to
-   `.claude/work/**`, and `job_*` tools. Everything else is denied,
+   `.work/**`, Read/Glob/Grep, and the job status/tail/stop tools. Everything else is denied,
    including Skill calls to agent-pause's own commands. The model sees the
    reason as `PreToolUse:<Tool> hook error: <reason>` and, in the spikes,
    ended its turn on the first deny.
@@ -225,9 +230,14 @@ can find it.
 
 ### `pause now`
 
-The `pause now` prompt hook itself (not the agent) finds the session's
-running foreground command and records it, then SIGTERM/SIGKILLs it. Spike 4
-showed how:
+Nothing in the session runs while a foreground command does: a command
+typed meanwhile is only queued, and plain text waits for the tool boundary.
+So each foreground Bash call gets a small **watcher** (`hooks/watch.sh`,
+started by the PreToolUse pre-filter, gone when PostToolUse fires). Every
+2 s it looks for a queued `pause now` in the transcript, or a request file
+from `pause <session> now` / `pause all now`, and then Python pauses the
+session and kills the command (live: killed ~2 s after the user typed it,
+reported to the agent as `Exit code 144`). Spike 4 showed how to find it:
 
 - The hook's parent process **is** the Claude process (no shell between),
   in both the CLI and the desktop app (`.../claude.app/Contents/MacOS/claude`).
@@ -240,9 +250,10 @@ showed how:
   the Bash call without `run_in_background` whose `tool_use_id` has no
   PostToolUse yet; match its `eval '<command>'` in the shell's argv.
 
-It It marks the current
-stage `interrupted: redo from start of stage` in the checkpoint. The agent
-then sees its tool fail, hits the gate on its next call, and pauses as above.
+The killed command goes into the checkpoint's `interrupted` list, and the
+resume context tells the agent to mark that stage `interrupted` and redo it
+from the start. The agent sees its tool fail, hits the gate on its next
+call, and pauses as above.
 
 ### Resume flow
 

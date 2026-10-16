@@ -26,14 +26,14 @@ Reference:
   - `/agent-pause:resume all`: clear pause-all (send each session a message to
     continue it).
   - `/agent-pause:resume <task>`: in a new session, pick up a task from
-    `.claude/work/<task>/TRACKER.md`.
+    `.work/<task>/TRACKER.md`.
   - `/agent-pause:status`: sessions, pause state, tasks, jobs.
   - Typing just `pause` (or `pause now`, `pause all`) also works.
 - **Terminal** (no idle session to type into):
   `pixi run --manifest-path <plugin dir>/pixi.toml pause all` (also `status`,
   `resume all`).
 - **Trackers:** for multi-step tasks Claude keeps
-  `.claude/work/<task>/TRACKER.md`: stages with status, the current step and
+  `.work/<task>/TRACKER.md`: stages with status, the current step and
   next action, jobs, resume notes. Stages become "accepted" only when you say
   so in chat. Claude is reminded to keep it current.
 - **Jobs:** work longer than ~2 minutes runs through the job tools as a

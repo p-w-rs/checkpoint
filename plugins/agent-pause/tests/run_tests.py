@@ -66,8 +66,8 @@ def denied(out):
 
 # A project with a tracker, and a transcript file.
 PROJ = TMP / "proj"
-(PROJ / ".claude" / "work" / "train-model").mkdir(parents=True)
-TRK = PROJ / ".claude" / "work" / "train-model" / "TRACKER.md"
+(PROJ / ".work" / "train-model").mkdir(parents=True)
+TRK = PROJ / ".work" / "train-model" / "TRACKER.md"
 TRK.write_text("""# Train the model
 Goal: a trained model.
 Started: 2026-10-15  Session: sess-aaaa1111  Updated: now
@@ -155,6 +155,10 @@ print("tracker parsing:")
 t = tracker.info(TRK)
 check("stages parsed", [s["status"] for s in t["stages"]] == ["accepted", "in progress", "todo"])
 check("Now section", "training epoch 3" in t["sections"]["Now"])
+_t2 = TMP / "t2" / "TRACKER.md"
+_t2.parent.mkdir()
+_t2.write_text("## Stages\n| # | S | Status | N |\n|---|---|---|---|\n| 1 | a | done (agent thinks it's finished) | |\n| 2 | b | in progress | |\n")
+check("'done (agent thinks...)' counts as finished", [x["n"] for x in tracker.info(_t2)["open"]] == ["2"])
 check("tracker found by session id", tracker.for_session(PROJ, SID)["slug"] == "train-model")
 check("by slug, partial", tracker.by_slug(PROJ, "train")["slug"] == "train-model")
 
@@ -202,7 +206,7 @@ check("Edit to the tracker allowed", hook("PreToolUse", base(
 check("Write elsewhere denied", denied(hook("PreToolUse", base(
     tool_name="Write", tool_input={"file_path": str(PROJ / "x.py")}))))
 check("../ escape out of the work dir denied", denied(hook("PreToolUse", base(
-    tool_name="Write", tool_input={"file_path": str(PROJ / ".claude/work/../../x.py")}))))
+    tool_name="Write", tool_input={"file_path": str(PROJ / ".work/../x.py")}))))
 check("Read allowed", hook("PreToolUse", base(tool_name="Read", tool_input={"file_path": "/etc/hosts"})) is None)
 check("job_status allowed", hook("PreToolUse", base(tool_name="mcp__plugin_agent-pause_jobs__job_status")) is None)
 check("job_start denied", denied(hook("PreToolUse", base(tool_name="mcp__plugin_agent-pause_jobs__job_start"))))

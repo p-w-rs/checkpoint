@@ -10,12 +10,12 @@ Started: 2026-10-15  Session: 7c46462d  Updated: 2026-10-15
 | 3 | Pause/resume gate, queue detection, commands | done | |
 | 4 | Jobs MCP server | done | |
 | 5 | pause now (watcher + kill tree) | done | watch.sh per foreground Bash call |
-| 6 | status, install.py, README, help | in progress | install.py + rules done; README, ARCHITECTURE, CLAUDE.md left |
-| 7 | Live test with claude -p --plugin-dir | todo | |
+| 6 | status, install.py, README, help | done | installer written, dry-run only |
+| 7 | Live test with claude -p --plugin-dir | done | queued pause, resume, pause now, job survives exit; trackers moved to .work/ |
 
 ## Now
-Current step: live test with claude -p --plugin-dir
-Next action: run the live checks, then README/ARCHITECTURE/CLAUDE.md
+Current step: none; all stages done, waiting for the user to accept
+Next action: user decides whether to install (`pixi run install`, shows a diff first) and to run desktop check D1 (spike/MANUAL.md)
 
 ## Jobs
 | Job | Command | Started | State | Redo / resume |
@@ -23,4 +23,4 @@ Next action: run the live checks, then README/ARCHITECTURE/CLAUDE.md
 
 ## Resume notes
 - Check first: git status; `cd plugins/agent-pause && pixi run test`.
-- Assumptions: marketplace named "agent-pause" (net-gateway's is "local-tools"; same name would clash).
+- Assumptions: marketplace named "agent-pause" (net-gateway's is "local-tools"; same name would clash). Trackers in .work/ (user decision: .claude/ writes always prompt).

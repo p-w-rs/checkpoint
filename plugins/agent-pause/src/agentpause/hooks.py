@@ -23,7 +23,7 @@ from . import core, procs, state, tracker, transcript
 
 SESSION_NOTE = """\
 agent-pause is on. Work so that you can be paused at any tool call and resumed later, possibly in a new session:
-- Tracker: for any task with more than a few steps, keep <cwd>/.claude/work/<task-slug>/TRACKER.md (template below). Create it as soon as the task clearly has several steps, put this session's id after "Session:", keep the Now section current, and update a stage's status when it changes. Put long detail in linked stage docs, not in the tracker.
+- Tracker: for any task with more than a few steps, keep <cwd>/{work}/<task-slug>/TRACKER.md (template below). Create it as soon as the task clearly has several steps, put this session's id after "Session:", keep the Now section current, and update a stage's status when it changes. Put long detail in linked stage docs, not in the tracker.
 - Mark a stage "accepted" only when the user says so in chat.
 - Anything likely to run more than ~2 minutes goes through the agent-pause job_start tool (it survives pauses and new sessions), with a row in the tracker's Jobs table and a redo_hint.
 - If a tool call is denied with "Paused by the user", don't start new work: bring the tracker up to date (Write/Edit to it are allowed), then end your turn with one line saying you're paused.
@@ -81,7 +81,7 @@ def session_main() -> int:
                              transcript_path=payload.get("transcript_path") or "",
                              claude_pid=claude_pid, source=payload.get("source") or "",
                              started=state.now_iso())
-        text = SESSION_NOTE.format(sid=sid, template=tracker.TEMPLATE)
+        text = SESSION_NOTE.format(sid=sid, work=state.work_dir_name(), template=tracker.TEMPLATE)
         if state.is_paused(sid):
             text += "\nThis session is PAUSED. The user's next message resumes it."
         cwd = payload.get("cwd") or ""

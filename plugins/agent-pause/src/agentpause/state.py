@@ -29,10 +29,16 @@ from typing import Any, Iterator
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 
+
+def work_dir_name() -> str:
+    """Trackers live in <project>/<this>/<task>/TRACKER.md. Not under .claude/:
+    Claude Code asks before every write there, and no rule or hook can lift
+    that. An env var, not config, because hooks/fast.sh reads it too."""
+    return os.environ.get("AGENT_PAUSE_WORK_DIR") or ".work"
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "nudge_every": 25,
     "max_denies": 3,
-    "work_dir": ".claude/work",
     "allow_while_paused": [
         "Read", "Glob", "Grep", "TodoWrite", "TaskList", "TaskGet",
         "mcp__ccd_turn__*",
