@@ -5,17 +5,17 @@ Started: 2026-10-15  Session: 7c46462d  Updated: 2026-10-15
 ## Stages
 | # | Stage | Status | Notes / details |
 |---|-------|--------|-----------------|
-| 1 | Skeleton: marketplace, plugin.json, pixi, run.py, tests | done | |
-| 2 | Tracker convention hooks | done | SessionStart note, PostToolUse nudge, Stop nudge |
-| 3 | Pause/resume gate, queue detection, commands | done | |
-| 4 | Jobs MCP server | done | |
-| 5 | pause now (watcher + kill tree) | done | watch.sh per foreground Bash call |
-| 6 | status, install.py, README, help | done | installer written, dry-run only |
-| 7 | Live test with claude -p --plugin-dir | done | queued pause, resume, pause now, job survives exit; trackers moved to .work/ |
+| 1 | Skeleton: marketplace, plugin.json, pixi, run.py, tests | accepted | |
+| 2 | Tracker convention hooks | accepted | SessionStart note, PostToolUse nudge, Stop nudge |
+| 3 | Pause/resume gate, queue detection, commands | accepted | |
+| 4 | Jobs MCP server | accepted | |
+| 5 | pause now (watcher + kill tree) | accepted | watch.sh per foreground Bash call |
+| 6 | status, install.py, README, help | accepted | installer written, dry-run only |
+| 7 | Live test with claude -p --plugin-dir | accepted | queued pause, resume, pause now, job survives exit; trackers moved to .work/ |
 
 ## Now
-Current step: none; all stages done, waiting for the user to accept
-Next action: installed 2026-10-15 (settings backup settings.json.bak.20261015202145); next: desktop check D1 (spike/MANUAL.md) in a new session
+Current step: finished; the user accepted the plugin as it stands after live tests (.work/pause-demo, fixes dd4ab37 and 56ba229)
+Next action: none
 
 ## Jobs
 | Job | Command | Started | State | Redo / resume |
