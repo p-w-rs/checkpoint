@@ -1,6 +1,6 @@
 # agent-pause: design
 
-Status: **built, not installed** (v0.1.0, 2026-10-15); see
+Status: **built and installed** (v0.1.0, 2026-10-15); see
 [ARCHITECTURE.md](ARCHITECTURE.md). Spikes run 2026-10-15 on Claude Code
 2.1.277 (CLI) / 2.1.295 (desktop); see the Spikes section. Written from a
 planning conversation with the user; decisions below are theirs unless
