@@ -214,6 +214,10 @@ def resume_here(sid: str) -> str:
     sess = state.load_session(sid)
     cwd = sess.get("cwd") or ""
     t = tracker.for_session(cwd, sid) if cwd else None
+    if not t and cwd and sess.get("task"):
+        # Another session may have taken the tracker over meanwhile (its id
+        # now leads the Session: line); the task we paused on still applies.
+        t = tracker.by_slug(cwd, sess["task"])
     cp = state.read_json(Path(sess["checkpoint"]), None) if sess.get("checkpoint") else None
     state.update_session(sid, interrupted=[])
     return resume_context(t, cp, cwd)

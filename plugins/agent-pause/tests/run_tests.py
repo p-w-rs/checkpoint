@@ -254,6 +254,18 @@ check("seen line recorded: later calls skip Python", hook("PreToolUse", bash(tid
 for f in state.p("running").glob("*.json"):
     f.unlink()
 
+print("resume after another session took the tracker over (d):")
+hook("UserPromptSubmit", base(prompt="/agent-pause:pause"))
+hook("PreToolUse", bash(tid="tu5"))   # first deny writes the checkpoint, records task
+_orig = TRK.read_text()
+TRK.write_text(_orig.replace("Session: sess-aaaa1111", "Session: other-session-9999 (earlier: sess-aaaa1111)")
+               .replace("| 2 | Training | in progress |", "| 2 | Training | done |"))
+out = hook("UserPromptSubmit", base(prompt="back again"))
+check("(d) resume still shows the task's tracker", "Tracker: " + str(TRK) in ctx(out))
+TRK.write_text(_orig)
+for f in state.p("running").glob("*.json"):
+    f.unlink()
+
 print("plain keyword:")
 out = hook("UserPromptSubmit", base(prompt="pause"))
 check("'pause' pauses and tells the agent to stop", state.is_paused(SID) and "end your turn" in ctx(out))
