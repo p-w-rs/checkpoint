@@ -15,7 +15,7 @@ Started: 2026-10-15  Session: 7c46462d  Updated: 2026-10-15
 
 ## Now
 Current step: none; all stages done, waiting for the user to accept
-Next action: user decides whether to install (`pixi run install`, shows a diff first) and to run desktop check D1 (spike/MANUAL.md)
+Next action: installed 2026-10-15 (settings backup settings.json.bak.20261015202145); next: desktop check D1 (spike/MANUAL.md) in a new session
 
 ## Jobs
 | Job | Command | Started | State | Redo / resume |

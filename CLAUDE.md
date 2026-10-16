@@ -1,7 +1,7 @@
 # CLAUDE.md: working on agent-pause
 
-The plugin is built (`plugins/agent-pause/`, v0.1.0) but **not installed**
-in the user's settings. User docs: [README.md](README.md). How it fits
+The plugin (`plugins/agent-pause/`, v0.1.0) is **installed** for the user
+from this checkout (edits are live in new sessions). User docs: [README.md](README.md). How it fits
 together: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Why, the user's
 decisions, and the spike findings it rests on: [docs/DESIGN.md](docs/DESIGN.md).
 Work in progress: `.work/<task>/TRACKER.md` (this repo uses its own tracker
