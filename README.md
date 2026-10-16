@@ -66,7 +66,8 @@ Needs only [Claude Code](https://code.claude.com) and
 [pixi](https://pixi.sh). macOS and Linux.
 
 ```bash
-cd plugins/agent-pause
+git clone https://github.com/p-w-rs/agent-pause.git
+cd agent-pause/plugins/agent-pause
 pixi run install --dry-run   # show what would change
 pixi run install             # register the plugin, allow the job tools in settings.json
 ```
