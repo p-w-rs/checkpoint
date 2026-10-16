@@ -244,7 +244,8 @@ out = hook("PreToolUse", bash(tid="tu2"))
 check("queued /agent-pause:pause: next tool call denied", denied(out))
 check("session paused by the queued command", state.load_session(SID).get("paused_by") == "queued command")
 dequeue("2026-10-16T02:00:05.000Z")
-hook("UserPromptSubmit", base(prompt="/agent-pause:pause"))   # it runs when the turn ends
+out = hook("UserPromptSubmit", base(prompt="/agent-pause:pause"))   # it runs when the turn ends
+check("(a) its echo says it already took effect while busy", "took effect at the next tool call" in ctx(out))
 hook("UserPromptSubmit", base(prompt="continue"))
 n0 = pycalls()
 check("after resume: the consumed queue entry doesn't re-pause", hook("PreToolUse", bash(tid="tu3")) is None)
@@ -315,6 +316,29 @@ check("session filter", {j["name"] for j in jobs.status(session_id=SID)["jobs"]}
 check("both command and argv refused", not jobs.start("x", command="a", argv=["b"])["ok"])
 check("missing cwd refused", not jobs.start("x", command="a", cwd=str(TMP / "nope"))["ok"])
 
+print("jobs started by another, still-running process (test 5 bug):")
+STARTER = f"""
+import sys, time
+sys.path.insert(0, {str(ROOT / "src")!r})
+from agentpause import jobs
+jobs.start("orphan", argv=["sleep", "30"], cwd={str(PROJ)!r}, redo_hint="", session_id="other")
+print("started", flush=True)
+time.sleep(20)   # stays alive and never reaps, like an open session's MCP server
+"""
+starter = subprocess.Popen([sys.executable, "-c", STARTER], stdout=subprocess.PIPE, text=True)
+starter.stdout.readline()
+t0 = time.time()
+try:
+    r = jobs.stop("orphan", "test")
+    err = None
+except Exception as e:  # noqa: BLE001
+    r, err = {}, e
+check("(c) job_stop from another process: no error", err is None and r.get("stopped"))
+check("(c) ...recorded as killed with its reason", jobs.status("orphan")["job"].get("state") == "killed"
+      and jobs.status("orphan")["job"].get("stop_reason") == "test")
+check("(c) ...without waiting out the grace period", time.time() - t0 < 4)
+starter.kill()
+
 print("MCP server:")
 env = dict(os.environ, CLAUDE_CODE_SESSION_ID="mcp-sess")
 msgs = [
@@ -333,6 +357,17 @@ check("four job tools", sorted(t["name"] for t in resp[2]["result"]["tools"]) ==
 check("job_start via MCP records the session", jobs.find("mcpjob")["session_id"] == "mcp-sess"
       and not resp[3]["result"]["isError"])
 check("unknown method -> error", resp[4]["error"]["code"] == -32601)
+srv = subprocess.Popen([sys.executable, str(ROOT / "run.py"), "server"], stdin=subprocess.PIPE,
+                       stdout=subprocess.PIPE, text=True, env=env)
+srv.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+    "name": "job_start", "arguments": {"name": "quickexit", "command": "true", "cwd": str(PROJ),
+                                       "redo_hint": ""}}}) + "\n")
+srv.stdin.flush()
+srv.stdout.readline()
+time.sleep(1)
+zombies = [r for r in procs.table().values() if r["ppid"] == srv.pid and procs.zombie(r["pid"])]
+check("(c) the server reaps its finished jobs (no zombie while it runs)", not zombies)
+srv.kill()
 
 # --- processes ------------------------------------------------------------------------
 print("processes:")
@@ -394,6 +429,13 @@ check("queued 'pause now' kills the running command", not procs.foreground_shell
 check("...and pauses the session", state.is_paused(SIDW))
 hook("PostToolUseFailure", payload)
 check("PostToolUseFailure removes the running file", not state.p("running", "tuW.json").exists())
+out = hook("UserPromptSubmit", {"session_id": SIDW, "cwd": str(PROJ), "prompt": "/agent-pause:pause now"})
+check("(a) queued 'pause now' echo names the killed command", "Stopped then: `sleep 32" in ctx(out)
+      and "No command was running" not in ctx(out))
+state.update_session(SIDW, checkpoint=str(core.write_checkpoint(SIDW)))
+out = hook("UserPromptSubmit", {"session_id": SIDW, "cwd": str(PROJ), "prompt": "back"})
+check("(b) resume names the killed command, defers to the tracker",
+      "killed `sleep 32" in ctx(out) and "Unless the tracker says otherwise" in ctx(out))
 fake.kill()
 fake2.kill()
 

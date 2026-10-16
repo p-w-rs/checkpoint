@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 from typing import Any
 
@@ -149,4 +150,5 @@ class Server:
 
 
 def main() -> None:
+    signal.signal(signal.SIGCHLD, jobs.reap_started)
     Server().run()

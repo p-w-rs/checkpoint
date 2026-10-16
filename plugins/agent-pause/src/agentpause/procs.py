@@ -69,7 +69,19 @@ def alive(pid: int | None) -> bool:
         return False
     except PermissionError:
         return True
-    return True
+    return not zombie(pid)
+
+
+def zombie(pid: int) -> bool:
+    """Exited but not yet reaped by its parent (e.g. a job whose starting
+    session is still open). It accepts signal 0 but is gone, and signalling
+    its group fails with EPERM on macOS."""
+    try:
+        out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.startswith("Z")
 
 
 def descendants(root: int, procs: dict[int, dict[str, Any]]) -> list[int]:

@@ -20,6 +20,19 @@ from typing import Any
 
 from . import procs, state
 
+# Jobs this process started. The MCP server reaps them as they exit (see
+# reap_started), so they don't linger as zombies while its session is open.
+STARTED: set[int] = set()
+
+
+def reap_started(*_: object) -> None:
+    for pid in list(STARTED):
+        try:
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                STARTED.discard(pid)
+        except ChildProcessError:
+            STARTED.discard(pid)
+
 
 def _registry() -> dict[str, Any]:
     reg = state.read_json(state.p("jobs.json"), {}) or {}
@@ -64,6 +77,7 @@ def start(name: str, command: str | None = None, argv: list[str] | None = None,
                                      cmdline, str(exitf)],
                                     cwd=cwd, stdin=subprocess.DEVNULL, stdout=out,
                                     stderr=subprocess.STDOUT, start_new_session=True)
+        STARTED.add(proc.pid)
         rec = {"id": jid, "name": name, "command": cmdline, "cwd": cwd,
                "pid": proc.pid, "pgid": proc.pid, "log": str(log), "exit_file": str(exitf),
                "started": state.now_iso(), "started_ts": time.time(),
@@ -158,9 +172,10 @@ def stop(name: str, reason: str = "", grace: float = 5.0) -> dict[str, Any]:
         return {"ok": False, "reason": f"no job named {name}"}
     if rec["state"] != "running":
         return {"ok": True, "job": _public(rec), "note": "not running"}
+    # EPERM: the group is only a zombie left (macOS), so nothing to signal.
     try:
         os.killpg(rec["pgid"], signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
     deadline = time.time() + grace
     while time.time() < deadline and procs.alive(rec["pid"]) and not Path(rec["exit_file"]).exists():
@@ -168,7 +183,7 @@ def stop(name: str, reason: str = "", grace: float = 5.0) -> dict[str, Any]:
     if procs.alive(rec["pid"]):
         try:
             os.killpg(rec["pgid"], signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
     with state.lock():
         reg = _registry()

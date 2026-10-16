@@ -110,14 +110,29 @@ def pause(sid: str, args: list[str], by: str) -> str:
         msgs.append(f"Pausing session {s['session_id'][:8]} at its next tool call.")
         targets = [s["session_id"]]
     else:
+        before = state.load_session(sid)
         fresh = state.set_paused(sid, by, now=now)
-        msgs.append("Paused: this session stops at its next tool call. "
-                    "Any message resumes it." if fresh else "Already paused.")
+        if fresh:
+            msgs.append("Paused: this session stops at its next tool call. Any message resumes it.")
+        else:
+            # Typically the queued command itself, arriving after the gate or
+            # watcher already acted on it: say what actually happened.
+            msg = "Already paused"
+            if (before.get("paused_by") or "").startswith("queued command"):
+                msg += (f" (since {(before.get('paused_at') or '')[11:19]}: it took effect "
+                        "at the next tool call while the session was busy)")
+            msgs.append(msg + ".")
+            earlier = before.get("interrupted") or []
+            if earlier:
+                msgs.append("Stopped then: " + ", ".join(
+                    f"`{c.get('command', '')[:80]}`" for c in earlier) + ".")
         targets = [sid]
     if now:
         n = sum(len(kill_foreground(t)) for t in targets)
-        msgs.append(f"Stopped {n} running command(s) now." if n
-                    else "No foreground command was running; a running one is stopped by its watcher within ~2 s.")
+        if n:
+            msgs.append(f"Stopped {n} running command(s) now.")
+        elif not any(state.load_session(t).get("interrupted") for t in targets):
+            msgs.append("No command was running.")
     if stop_jobs:
         stopped = []
         for t in targets:
@@ -183,8 +198,10 @@ def resume_context(t: dict[str, Any] | None, cp: dict[str, Any] | None, cwd: str
         if changes:
             parts.append("What changed since:\n- " + "\n- ".join(changes))
         if cp.get("interrupted"):
-            parts.append("A command was killed by `pause now`: mark its stage "
-                         "'interrupted' in the tracker and redo it from the start of the stage.")
+            cmds = ", ".join(f"`{c.get('command', '')[:80]}`" for c in cp["interrupted"])
+            parts.append(f"`pause now` killed {cmds}. Unless the tracker says otherwise (e.g. "
+                         "the kill was intended or the work is already redone), mark that "
+                         "stage 'interrupted' and redo it from the start of the stage.")
     parts.append("Resume: check the tracker's 'Check first' items and the changes above, "
                  "then continue from 'Next action'. Keep the tracker current.")
     parts.append("</agent-pause-resume>")
