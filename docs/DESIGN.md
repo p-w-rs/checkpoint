@@ -127,6 +127,12 @@ with:
   network connections may fail. That's what `redo_hint` is for.
 - Built-in `run_in_background` Bash is not a substitute: it dies with the
   Claude process (Spike 4).
+- Jobs run with the session's environment, not the MCP server's: the server
+  runs under `pixi run` of checkpoint's own manifest, so `job_start` drops that
+  activation (`PIXI_PROJECT_*`, `PIXI_ENVIRONMENT_*`, `PIXI_IN_SHELL`,
+  `CONDA_PREFIX` etc., our `.pixi/envs/*/bin` on PATH). Otherwise a job's own
+  `pixi run` uses checkpoint's pixi.toml (`PIXI_PROJECT_MANIFEST` wins over the
+  cwd). Another project's activation (a session under `pixi shell`) is kept.
 
 ## 3. Pause and resume
 

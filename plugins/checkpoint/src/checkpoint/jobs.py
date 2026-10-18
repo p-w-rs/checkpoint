@@ -48,6 +48,34 @@ def _slug(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-")[:40] or "job"
 
 
+# Set by `pixi run` when it activates our own environment (the MCP server runs
+# under it). A job must not inherit them: PIXI_PROJECT_MANIFEST alone makes
+# any `pixi run` in the job use checkpoint's pixi.toml instead of its own.
+_PIXI_ACTIVATION = ("PIXI_PROJECT_MANIFEST", "PIXI_PROJECT_ROOT", "PIXI_PROJECT_NAME",
+                    "PIXI_PROJECT_VERSION", "PIXI_ENVIRONMENT_NAME",
+                    "PIXI_ENVIRONMENT_PLATFORMS", "PIXI_IN_SHELL", "PIXI_PROMPT", "PIXI_EXE",
+                    "CONDA_PREFIX", "CONDA_DEFAULT_ENV", "CONDA_SHLVL")
+
+
+def job_env(environ: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment the user's session had: our own pixi activation removed
+    (its variables, and our .pixi/envs bin dirs from PATH). Another project's
+    activation (the session itself running under `pixi shell`) is kept."""
+    env = dict(os.environ if environ is None else environ)
+    ours = str(state.PLUGIN_ROOT)
+    root = env.get("PIXI_PROJECT_ROOT")
+    if root and os.path.realpath(root) == os.path.realpath(ours):
+        for k in _PIXI_ACTIVATION:
+            env.pop(k, None)
+        if env.get("INIT_CWD") == root:
+            env.pop("INIT_CWD")
+    pixi_dirs = (os.path.join(ours, ".pixi") + os.sep, os.path.join(os.path.realpath(ours), ".pixi") + os.sep)
+    if "PATH" in env:
+        env["PATH"] = os.pathsep.join(d for d in env["PATH"].split(os.pathsep)
+                                      if not d.startswith(pixi_dirs))
+    return env
+
+
 def start(name: str, command: str | None = None, argv: list[str] | None = None,
           cwd: str | None = None, redo_hint: str = "", task: str = "",
           session_id: str = "") -> dict[str, Any]:
@@ -75,7 +103,7 @@ def start(name: str, command: str | None = None, argv: list[str] | None = None,
         with open(log, "ab") as out:
             proc = subprocess.Popen(["/bin/sh", "-c", wrapper, f"checkpoint-job-{jid}",
                                      cmdline, str(exitf)],
-                                    cwd=cwd, stdin=subprocess.DEVNULL, stdout=out,
+                                    cwd=cwd, env=job_env(), stdin=subprocess.DEVNULL, stdout=out,
                                     stderr=subprocess.STDOUT, start_new_session=True)
         STARTED.add(proc.pid)
         rec = {"id": jid, "name": name, "command": cmdline, "cwd": cwd,

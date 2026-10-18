@@ -337,6 +337,37 @@ check("session filter", {j["name"] for j in jobs.status(session_id=SID)["jobs"]}
 check("both command and argv refused", not jobs.start("x", command="a", argv=["b"])["ok"])
 check("missing cwd refused", not jobs.start("x", command="a", cwd=str(TMP / "nope"))["ok"])
 
+print("jobs don't inherit checkpoint's own pixi activation:")
+OURS = str(ROOT)
+OUR_BIN = f"{OURS}/.pixi/envs/default/bin"
+ACT = {"PIXI_PROJECT_MANIFEST": f"{OURS}/pixi.toml", "PIXI_PROJECT_ROOT": OURS,
+       "PIXI_PROJECT_NAME": "checkpoint", "PIXI_ENVIRONMENT_NAME": "default", "PIXI_IN_SHELL": "1",
+       "CONDA_PREFIX": f"{OURS}/.pixi/envs/default", "CONDA_DEFAULT_ENV": "checkpoint",
+       "INIT_CWD": OURS, "PIXI_HOME": "/keep/pixi-home",
+       "PATH": os.pathsep.join([OUR_BIN, "/usr/bin", "/bin"])}
+saved = {k: os.environ.get(k) for k in ACT}
+os.environ.update(ACT)
+try:
+    jobs.start("envjob", command="env", cwd=str(PROJ), redo_hint="", session_id=SID)
+finally:
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+time.sleep(1)
+jenv = dict(line.split("=", 1) for line in Path(jobs.find("envjob")["log"]).read_text().splitlines()
+            if "=" in line)
+check("(c) job env: no PIXI_PROJECT_MANIFEST/ROOT, CONDA_PREFIX, PIXI_IN_SHELL",
+      not {"PIXI_PROJECT_MANIFEST", "PIXI_PROJECT_ROOT", "CONDA_PREFIX", "PIXI_IN_SHELL",
+           "CONDA_DEFAULT_ENV", "INIT_CWD"} & set(jenv))
+check("(c) job env: our .pixi bin dir gone from PATH, the rest kept",
+      jenv.get("PATH", "").split(os.pathsep) == ["/usr/bin", "/bin"])
+check("job env: the user's own pixi settings (PIXI_HOME) kept", jenv.get("PIXI_HOME") == "/keep/pixi-home")
+other = dict(ACT, PIXI_PROJECT_ROOT="/elsewhere/proj", PIXI_PROJECT_MANIFEST="/elsewhere/proj/pixi.toml")
+check("job env: another project's activation (session under pixi shell) kept",
+      jobs.job_env(other).get("PIXI_PROJECT_MANIFEST") == "/elsewhere/proj/pixi.toml")
+
 print("jobs started by another, still-running process (test 5 bug):")
 STARTER = f"""
 import sys, time

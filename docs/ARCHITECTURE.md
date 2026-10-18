@@ -29,7 +29,7 @@ job tools ────▶ MCP server "jobs" (mcp_server.py ─▶ jobs.py)
 | `tracker.py` | Finds and parses `.work/<task>/TRACKER.md` (stages table, sections, `Session:` id). Read-only. |
 | `core.py` | Pause (incl. `now`, `all`, `--stop-jobs`, another session), checkpoint, resume context, status. |
 | `procs.py` | `ps` table, finding Claude from a hook's parent, matching a Bash tool shell by its `eval '<command>'`, killing a tree group by group. |
-| `jobs.py` | Detached jobs: `sh` wrapper in its own session writing `exit_code`; states running / exited / killed / vanished. The MCP server reaps the jobs it started (SIGCHLD), and `procs.alive` treats an unreaped zombie as dead, so another session can stop a job cleanly. |
+| `jobs.py` | Detached jobs: `sh` wrapper in its own session writing `exit_code`; states running / exited / killed / vanished. The MCP server reaps the jobs it started (SIGCHLD), and `procs.alive` treats an unreaped zombie as dead, so another session can stop a job cleanly. Jobs get `job_env()`: the environment minus checkpoint's own pixi activation. |
 | `mcp_server.py` | Hand-rolled stdio JSON-RPC (initialize, tools/list, tools/call, ping). Session id from `CLAUDE_CODE_SESSION_ID`. |
 | `cli.py` | `pixi run status / pause / resume`. |
 
