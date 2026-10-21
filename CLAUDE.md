@@ -17,7 +17,8 @@ idempotent pause retries with pause ids): 0.7.0; the acceptance fixes:
 0.7.1; a gateway refusal never runs a job in the own runner: 0.7.2; the
 GitHub install test's fixes (a truthful first status, the gateway's contract
 file in the password database's home for the mod too, the state's normal
-forms in the footer): 0.7.3), with
+forms in the footer; and, from its verification, no status change while a
+prompt is being submitted): 0.7.3, unshipped), with
 the gateway contract
 in [docs/CONTRACT-v1.md](docs/CONTRACT-v1.md) (identical to the gateway's
 copy; `gateway.py` is its client).
@@ -112,7 +113,35 @@ pixi exec --spec python=3.12 --spec pyte python tests/acceptance_independence.py
 pixi exec --spec python=3.12 --spec pyte python tests/acceptance_durability.py --tmp <dir> --pixi-cache <dir>   # 14.11 (~2 min)
 ```
 
-Last full run (2026-10-21, 0.7.3, the GitHub install test's fixes): the
+Last full run (2026-10-21, 0.7.3 unshipped, the verification's stall fix):
+the suite 961 passed (macOS, sh = bash 3.2), under dash 955; `claude plugin
+test .` 64 passed (3 new in `tests/mod/status.test.ts`, on a world whose
+classic UserPromptSubmit and `env.sh state` can be held: `submitHold`,
+`stateHold`); `validate` passes for the plugin and the marketplace; the mod
+typechecks (tsc, 2.1.301's shipped types). The fix: after `claude --resume`
+of a paused session the first typed message stalled Claude Code for 60 s
+(acceptance_recovery part a, 4 of 4 verification runs): the 1 s status look
+cleared the status line while the classic UserPromptSubmit hook ran, and
+Claude Code read the hook's result only at its timeout. The mod now changes
+neither the status line nor the footer label while a prompt is being
+submitted (`submitting`; checked before the state is read and again before
+the draw; what is owed is drawn once `next()` returned). Mutations (each on
+a scratch copy; 3 of 3): no `submitting` check at all (3 mod tests failed),
+only the check before the state is read (1: a look already reading the
+state drew mid-submit), nothing drawn once the hook returned (3). TUI
+(macOS 2.1.301, installed copies, scratch config, fake API): recovery part
+a 3 of 3 runs 19/19 (the first prompt after the restart settled in
+0.44-0.47 s, was 60.6 s; no status draw between the session start and the
+hook's end), then `acceptance_recovery` 40/40, `acceptance_journal` 20/20,
+`acceptance_gateway` 27/27 (with the gateway's working tree of the day,
+uncommitted changes of another task included). Not run this round: the
+Debian VM, the other TUI scripts, a TMPDIR of ~180 characters. Not done:
+the stall itself is Claude Code's (a plugin status line cleared during a
+UserPromptSubmit hook in a resumed session blocks until the hook's 60 s
+timeout); it is not reported upstream yet, and the gateway mod's
+`status($, 'setup', undefined)` on ready may meet it the same way
+(unverified).
+Before (2026-10-21, 0.7.3, the GitHub install test's fixes): the
 suite 961 passed (macOS, sh = bash 3.2), under dash 955 (two earlier dash
 runs failed only the fast-path overhead timing: sequential medians,
 PreToolUse 47.6 -> 60.1 ms, with the machine at load 8-10 from other users'
@@ -749,6 +778,18 @@ needs a new spike.
   bottom hook that returns a Text element). The status line keeps a pause
   and the failures (`logic.statusOf`). TUI tests matching `check: recording`
   in the screen text still find it (the footer row).
+- Never change the status line or the footer label while a prompt is being
+  submitted: after `claude --resume` of a paused session, the status line
+  cleared (the 1 s look) while the classic UserPromptSubmit hook of the
+  first typed message ran held that prompt until the hook's 60 s timeout
+  (the hook itself was done in under a second; the mod's `SessionMode`
+  render asked for at the clear settled at the same moment; mid-session the
+  same clear didn't stall, nor did a string in place of the clear). The
+  mod's `prompt.submit` counts itself in `submitting`; `refreshStatus`
+  checks it at the start and again before it draws (a look that read the
+  state before the prompt came), and what is owed is drawn once `next()`
+  returned (that `$` still draws in a live session: "(cleared)" 22 ms after
+  the hook settled; at the session's end it is "no session bound; dropped").
 - The mod can't read the password database: the gateway's contract file
   (in that home, as `gateway.contract_path`) comes from `env.sh
   contract-path` (0.7.3; it used `$HOME`, so with HOME elsewhere the

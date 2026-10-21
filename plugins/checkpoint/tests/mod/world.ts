@@ -37,6 +37,17 @@ export type World = {
   /** The footer's mode labels as the last SessionMode drawing passed them down. */
   modes: string[]
   env: Record<string, string>
+  /** While set, prompt.submit beneath the mod (the classic UserPromptSubmit hook) waits for it. */
+  submitHold?: Promise<void>
+  /** While set, `env.sh state` waits for it. */
+  stateHold?: Promise<void>
+}
+
+/** A promise and the function that resolves it (a hold a test releases). */
+export function hold(): { wait: Promise<void>; release: () => void } {
+  let release = () => {}
+  const wait = new Promise<void>(resolve => { release = resolve })
+  return { wait, release }
 }
 
 /** A finished process as $.process.run answers it. */
@@ -89,7 +100,7 @@ export function world(on: On, opts: { flagFails?: boolean; writeFails?: boolean;
     w.files.set(e.path, e.text)
     return { value: undefined }
   })
-  on('process.run', ($, e) => {
+  on('process.run', async ($, e) => {
     const argv = [...e.argv]
     w.runs.push(argv)
     w.events.push(`${argv[2]} ${argv[3]}`)
@@ -107,6 +118,7 @@ export function world(on: On, opts: { flagFails?: boolean; writeFails?: boolean;
     }
     if (mode === 'state') {
       w.stateEnvs.push({ ...(e.init?.env ?? {}) } as Record<string, string>)
+      if (w.stateHold) await w.stateHold
       return w.shell === undefined ? ran(1, '', 'no answer') : ran(0, `${w.shell}\n`)
     }
     if (mode === 'contract-path') return w.contractPath === undefined ? ran(1, '', 'no answer') : ran(0, `${w.contractPath}\n`)
@@ -153,9 +165,10 @@ export function world(on: On, opts: { flagFails?: boolean; writeFails?: boolean;
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
   on('command.run', ($, e) => ({ text: `SKILL ${e.command} ${e.args}` }))
-  on('prompt.submit', ($, e) => {
+  on('prompt.submit', async ($, e) => {
     w.noresumeSeen.push(w.files.has(`${HOME}/noresume/${SID}`))
     if (e.origin.kind === 'plugin') w.submitted.push(e.text)
+    if (w.submitHold) await w.submitHold
     return { text: e.text }
   })
   on('ui.open', ($, e) => {
