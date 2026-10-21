@@ -94,7 +94,7 @@ Reference:
   (`CHECKPOINT_KEEP_DAYS`, `CHECKPOINT_KEEP_OPEN_DAYS`; 0 keeps them
   forever), never while one of its sessions runs or is paused.
 - **Setup:** the first session builds checkpoint's Python with pixi in the
-  background (about a minute); pausing works meanwhile. It lives in Claude
+  background (usually under a minute); pausing works meanwhile. It lives in Claude
   Code's plugin data folder, never in the plugin folder.
 - **Trackers:** for multi-step tasks Claude keeps
   `.work/<task>/TRACKER.md`: stages with status, the current step and

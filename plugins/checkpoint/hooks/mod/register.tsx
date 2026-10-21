@@ -26,7 +26,12 @@
 //   the prompt is held back (fails closed).
 // - /check-doctor (immediate) and /check:doctor; /check:status answered from
 //   Python without a model turn when the runtime is ready.
-// - A status line: recording / paused / setting up / recording FAILED.
+// - Its state: recording / setting up / updating as a dim label in the
+//   prompt footer (SessionMode), paused / recording FAILED / setup FAILED /
+//   no pixi / unknown on the status line (Claude Code draws every plugin
+//   status line with a warning sign: $.ui.status has no level). Truthful from
+//   the first draw: until SessionStart recorded the env (rt/<session>, written
+//   after the mod's session.start) env.sh says what the runtime is doing.
 // - The journal (PLAN-v4 phase 2): turn.start / turn.complete, compactions
 //   and calls its gate denied go to the session's spool (env.sh spool: the
 //   same records fast.sh writes), and a timer has Python ingest the spool
@@ -55,14 +60,15 @@
 import type { EngineInterface, Register } from 'claude-code'
 import {
   ackText, allowedTool, cancelDenyReason, clockOf, denyReason, GATE_FAILED, insideWorkDir, jobLive, MAX_DENIES,
-  NORESUME_FAILED, parseCancelArgs, parseSelfArgs, parseSelfPause, RESUME_PROMPT, rowText, safeId, TRACKER_TOOLS,
-  TYPED_ORIGINS, typedResumes,
+  NORESUME_FAILED, parseCancelArgs, parseSelfArgs, parseSelfPause, pluginDataDir, RESUME_PROMPT, rowText,
+  RUNTIME_WORDS, safeId, statusOf, TRACKER_TOOLS, TYPED_ORIGINS, typedResumes,
 } from './logic.ts'
 import type { Call, CheckpointRow, Job } from './logic.ts'
 
 type E = EngineInterface
 
 const STATUS_EVERY_MS = 2000
+const STATUS_SOON_MS = [300, 1000] // after the session start: SessionStart has recorded the env by then
 const INGEST_EVERY_MS = 20000
 const RESUME_EVERY_MS = 250
 const GW_ACK_WAIT_MS = 1500 // how long the pause ack waits for the gateway's per-job outcomes
@@ -72,7 +78,9 @@ let turnId: string | undefined // the main loop's running turn (turn.start witho
 let denies = 0 // calls denied while paused in this turn
 let pending = false // a pause is being written: the gate holds meanwhile
 let memoryOnly = false // the pause flag couldn't be written: the gate holds anyway
-let lastStatus: string | undefined
+let lastStatus: string | undefined // the status line drawn ($.ui.status): attention states only
+let modeLabel: string | undefined // the footer's mode label drawn (SessionMode): the normal states
+let contractAt: string | undefined // the gateway's discovery file, as env.sh found it (the home doesn't change)
 let home: string | undefined
 let ingestedAt = 0 // the spool index's mtime when the timer last had it ingested
 let ingesting = false
@@ -116,12 +124,21 @@ async function recordedEnv($: E): Promise<string> {
   }
 }
 
+/** Where env.sh finds the runtime: the env SessionStart recorded, else (the
+ * mod's session.start runs before that hook) this copy's data folder. */
+async function runtimeEnv($: E): Promise<Record<string, string>> {
+  const envd = await recordedEnv($)
+  if (envd) return { CHECKPOINT_ENVD: envd }
+  const cfg = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${(await $.env.get('HOME')) ?? ''}/.claude`
+  const data = pluginDataDir($.plugin.root, $.plugin.name, cfg)
+  return data ? { CHECKPOINT_PLUGIN_DATA: data } : {}
+}
+
 /** hooks/env.sh ARGS: the shell half that needs no Python. */
 async function sh($: E, args: readonly string[], timeoutMs = 5000): Promise<{ ok: boolean; out: string; code: number }> {
   try {
-    const envd = args[0] === 'flag' ? '' : await recordedEnv($)
     const r = await $.process.run(['/bin/sh', `${$.plugin.root}/hooks/env.sh`, ...args], {
-      env: envd ? { CHECKPOINT_ENVD: envd } : {},
+      env: args[0] === 'flag' || args[0] === 'contract-path' ? {} : await runtimeEnv($),
       timeoutMs,
     })
     return { ok: r.exitCode === 0, out: r.exitCode === 0 ? r.stdout : `${r.stderr}${r.stdout}`.trim(), code: r.exitCode }
@@ -217,22 +234,38 @@ async function runtimeReady($: E): Promise<boolean | undefined> {
   return st === undefined ? undefined : st !== 'missing'
 }
 
+/** What the runtime is doing as env.sh says it (a RUNTIME_WORDS word), or ''. */
+async function shellState($: E): Promise<string> {
+  const r = await sh($, ['state'])
+  const w = r.ok ? r.out.trim() : ''
+  return RUNTIME_WORDS.includes(w) ? w : ''
+}
+
 async function refreshStatus($: E): Promise<void> {
-  let text: string
+  let s: { text: string; warn: boolean }
   try {
-    const rt = await runtimeState($)
-    if (await isPaused($)) text = 'paused · type a message or /check:resume to resume'
-    else if (rt === 'missing') text = 'setting up its runtime (first run); pausing works'
-    else if (await recordingFailed($)) text = 'recording FAILED · /check-doctor'
-    // An update's env builds in the background; the previous one records meanwhile.
-    else if (rt === 'older') text = 'recording · updating its runtime in the background'
-    else text = 'recording'
+    const paused = await isPaused($)
+    let runtime = ''
+    if (!paused) {
+      runtime = (await runtimeState($)) ?? ''
+      // Not ready by its files, or not recorded yet (SessionStart writes rt/<session>
+      // after the mod's session.start): the shell says building, failed, no pixi or
+      // ready, so the first draw never says "recording" while the runtime builds.
+      if (runtime !== 'ready' && runtime !== 'older') runtime = (await shellState($)) || runtime
+    }
+    s = statusOf({ paused, runtime, recordingFailed: !paused && (await recordingFailed($)) })
   } catch {
-    text = 'state unknown (/check-doctor)'
+    s = { text: 'state unknown (/check-doctor)', warn: true }
   }
-  if (text !== lastStatus) {
-    lastStatus = text
-    $.ui.status(text)
+  const line = s.warn ? s.text : undefined
+  const label = s.warn ? undefined : `check: ${s.text}`
+  if (line !== lastStatus) {
+    lastStatus = line
+    $.ui.status(line)
+  }
+  if (label !== modeLabel) {
+    modeLabel = label
+    $.ui.invalidate('ui.render') // the SessionMode hook draws the new label
   }
 }
 
@@ -260,22 +293,31 @@ async function runningJobs($: E, sid: string): Promise<Job[]> {
   }
 }
 
-/** Where the gateway's daemon writes its discovery file (CONTRACT-v1;
- * CHECKPOINT_GATEWAY_CONTRACT overrides it, '' turns the integration off).
- * Python's gateway.discover makes the real checks; this only decides
- * whether to ask it. */
-async function contractPath($: E): Promise<string> {
+/** Where the gateway's daemon writes its discovery file (CONTRACT-v1), as
+ * Python's gateway.contract_path finds it: CHECKPOINT_GATEWAY_CONTRACT ('' turns
+ * the integration off), else in the password database's home, which env.sh
+ * reads (a mod can't; $HOME may point elsewhere, and the gateway's daemon
+ * writes it in that home). null when the shell couldn't say. Python's
+ * gateway.discover makes the real checks; this only decides whether to ask it. */
+async function contractPath($: E): Promise<string | null> {
   const env = await $.env.get('CHECKPOINT_GATEWAY_CONTRACT')
   if (env !== undefined) return env
-  return `${(await $.env.get('HOME')) ?? ''}/.config/gateway/run/contract.json`
+  if (contractAt === undefined) {
+    const r = await sh($, ['contract-path'])
+    const p = r.out.trim()
+    if (!r.ok || !p.startsWith('/')) return null
+    contractAt = p
+  }
+  return contractAt
 }
 
 /** The gateway's half of a pause (Python's gw-pause: POST /v1/pause for this
  * session's task, each job's on_pause policy): its line for the ack, '' when
- * there is no gateway. */
+ * there is no gateway. Where the contract file can't be found out, Python
+ * decides (it says nothing when there is no gateway). */
 async function gatewayPause($: E, sid: string): Promise<string> {
   const path = await contractPath($)
-  if (!path || !(await $.fs.exists(path).catch(() => false))) return ''
+  if (path === '' || (path !== null && !(await $.fs.exists(path).catch(() => false)))) return ''
   if (!(await runtimeReady($))) return "Gateway: not told yet (checkpoint's runtime isn't ready); checkpoint tells it once it is."
   const r = await sh($, ['run', 'gw-pause', sid], 15000)
   try {
@@ -406,7 +448,7 @@ async function resumeNow($: E, ref: string): Promise<string> {
       void refreshStatus($)
       return 'checkpoint: resumed (the pause was held in memory only); without the runtime there is no reconciliation: check the files and anything that was running before going on.'
     }
-    return "checkpoint: /check-resume reconciles first, and checkpoint's runtime isn't ready yet (first-time setup). Type a message to resume without it (no resume notes), or try again in a minute."
+    return "checkpoint: /check-resume reconciles first, and checkpoint's runtime isn't ready yet (first-time setup). Type a message to resume without it (no resume notes), or try again once the setup is done (the footer says recording)."
   }
   const sid = await $.session.id()
   const r = await sh($, ['run', 'resume-now', sid, ...(ref.trim() ? [ref.trim()] : [])], 60000)
@@ -569,6 +611,7 @@ export const register: Register = on => {
       immediate: true,
     }).catch(failed('check-diff'))
     void refreshStatus($)
+    for (const ms of STATUS_SOON_MS) $.clock.after(ms, () => void refreshStatus($))
     $.clock.every(STATUS_EVERY_MS, () => void refreshStatus($))
     $.clock.every(INGEST_EVERY_MS, () => void ingestTick($))
     $.clock.every(RESUME_EVERY_MS, () => sendResume($))
@@ -749,6 +792,11 @@ export const register: Register = on => {
     }
     return { text }
   }).catch(() => ({ text: 'checkpoint: /check-list failed; /check:list asks the runtime instead.' }))
+
+  // The normal states as a dim mode label at the right of the prompt footer
+  // (the status line's warning sign is for a pause or a failure).
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) =>
+    modeLabel ? next({ ...e, props: { ...e.props, modes: [...e.props.modes, modeLabel] } }) : next(e))
 
   // The Checkpoints pane: each row diffs against now, or resumes from there.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

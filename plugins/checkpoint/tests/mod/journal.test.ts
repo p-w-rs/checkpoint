@@ -6,7 +6,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { MockClock } from 'claude-code/testing'
-import { listOf } from './world.ts'
+import { footer, listOf } from './world.ts'
 
 const HOME = '/state'
 const SID = 'sess-1'
@@ -15,14 +15,14 @@ const COMPOSER = { kind: 'composer' } as const
 const PRESENT = { isFullscreen: false, columns: 100 }
 
 type Run = { argv: string[]; stdin?: string }
-type World = { files: Map<string, string>; mtimes: Map<string, number>; runs: Run[]; aborts: string[]; statuses: (string | undefined)[]; clock: MockClock }
+type World = { files: Map<string, string>; mtimes: Map<string, number>; runs: Run[]; aborts: string[]; statuses: (string | undefined)[]; clock: MockClock; modes: string[] }
 
 function ran(exitCode: number, stdout = '', stderr = '') {
   return { value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false } }
 }
 
 function world(on: On, opts: { envReady?: boolean; saveFails?: boolean } = {}): World {
-  const w: World = { files: new Map(), mtimes: new Map(), runs: [], aborts: [], statuses: [], clock: mock.clock(on) }
+  const w: World = { files: new Map(), mtimes: new Map(), runs: [], aborts: [], statuses: [], clock: mock.clock(on), modes: [] }
   const env: Record<string, string> = { CHECKPOINT_HOME: HOME, HOME: '/home/u' }
   on('env.get', ($, e) => ({ value: env[e.name] }))
   on('session.id', () => ({ value: SID }))
@@ -70,6 +70,10 @@ function world(on: On, opts: { envReady?: boolean; saveFails?: boolean } = {}): 
     return { value: undefined }
   })
   on('ui.log', () => ({ value: undefined }))
+  on('ui.render', { component: 'SessionMode' }, ($, e) => {
+    w.modes = [...e.props.modes]
+    return { type: 'Text' as const, props: { dimColor: true }, children: [e.props.modes.join(' & ')] }
+  })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: 'done' }))
@@ -204,11 +208,13 @@ test('/check:status asks Python for this session (its task summary included)', a
 test('the status line says when recording failed', async ($, on) => {
   const w = world(on)
   await start($)
-  await settle(w, () => w.statuses.at(-1) === 'recording')
+  await settle(w, () => false)
+  expect(await footer($, w)).toEqual(['focus', 'check: recording'])
   w.files.set(`${HOME}/journal-errors/${SID}`, '{"error": "No space left on device"}')
   await w.clock.advance(2000)
-  await settle(w, () => w.statuses.at(-1) !== 'recording')
+  await settle(w, () => w.statuses.length > 0)
   expect(w.statuses.at(-1)).toBe('recording FAILED · /check-doctor')
+  expect(await footer($, w)).toEqual(['focus'])
   w.files.delete(`${HOME}/journal-errors/${SID}`)
   w.files.set(`${HOME}/spool-errors/${SID}`, 'x')
   await w.clock.advance(2000)
@@ -224,16 +230,16 @@ test("an update's env still building: the previous env records, so the status li
   w.files.set('/data/envs/old000000000/.ready', '')
   w.files.set('/data/envs/old000000000/.pixi/envs/default/bin/python3', '')
   await start($)
-  await settle(w, () => w.statuses.length > 0)
-  expect(w.statuses.at(-1)).toBe('recording · updating its runtime in the background')
-  expect(w.statuses.some(s => String(s).includes('first run'))).toBe(false)
+  await settle(w, () => false)
+  expect(await footer($, w)).toEqual(['focus', 'check: recording · updating its runtime in the background'])
+  expect(w.statuses).toEqual([])
   const out = await $.command.run({ command: 'check-save', args: '', origin: COMPOSER, presentation: PRESENT })
   expect(out.text).toContain('saved and synced to disk')
   // Once the new env is ready: plain recording.
   w.files.set('/data/envs/newnew000000/.ready', '')
   await w.clock.advance(2000)
-  await settle(w, () => w.statuses.at(-1) === 'recording')
-  expect(w.statuses.at(-1)).toBe('recording')
+  await settle(w, () => false)
+  expect(await footer($, w)).toEqual(['focus', 'check: recording'])
 })
 
 test('a first run (no env built at all): setting up, and Python commands say the runtime is not ready', async ($, on) => {
@@ -243,8 +249,9 @@ test('a first run (no env built at all): setting up, and Python commands say the
   w.files.set('/data/envs/newnew000000.building/pid', '123')
   w.files.set('/data/envs/half00000000/.pixi/envs/default/bin/python3', '')
   await start($)
-  await settle(w, () => w.statuses.length > 0)
-  expect(w.statuses.at(-1)).toBe('setting up its runtime (first run); pausing works')
+  await settle(w, () => false)
+  expect(await footer($, w)).toEqual(['focus', 'check: setting up its runtime (first run); pausing works'])
+  expect(w.statuses).toEqual([])
   const out = await $.command.run({ command: 'check-save', args: '', origin: COMPOSER, presentation: PRESENT })
   expect(out.text).toContain('NOT saved')
   expect(w.runs.some(r => r.argv[3] === 'save')).toBe(false)

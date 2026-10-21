@@ -220,6 +220,51 @@ export function ackText(r: PauseReport): string {
   return lines.join('\n')
 }
 
+/** What `env.sh state` answers (hooks/lib.sh ck_state). */
+export const RUNTIME_WORDS: readonly string[] = ['ready', 'older', 'building', 'failed', 'nopixi', 'missing']
+
+/** What checkpoint shows about itself, and whether it needs the person's
+ * attention. Claude Code draws every plugin status line ($.ui.status) with a
+ * warning sign (2.1.301: a pinned notice; $.ui.status takes only the text), so
+ * the normal states (recording, setting up, updating) go to the prompt
+ * footer's dim mode labels (`warn: false`), and only a pause, a failure or an
+ * unknown state uses the status line (`warn: true`). `runtime` is a
+ * RUNTIME_WORDS word, '' when nothing could say. */
+export function statusOf(s: { paused: boolean; runtime: string; recordingFailed: boolean }): { text: string; warn: boolean } {
+  if (s.paused) return { text: 'paused · type a message or /check:resume to resume', warn: true }
+  switch (s.runtime) {
+    case 'building':
+    case 'missing':
+      return { text: 'setting up its runtime (first run); pausing works', warn: false }
+    case 'failed':
+      return { text: 'runtime setup FAILED · /check-doctor; pausing works', warn: true }
+    case 'nopixi':
+      return { text: 'no runtime: pixi not found · /check-doctor; pausing works', warn: true }
+    case 'ready':
+    case 'older':
+      break
+    default:
+      return { text: 'state unknown (/check-doctor)', warn: true }
+  }
+  if (s.recordingFailed) return { text: 'recording FAILED · /check-doctor', warn: true }
+  // An update's env builds in the background; the previous one records meanwhile.
+  if (s.runtime === 'older') return { text: 'recording · updating its runtime in the background', warn: false }
+  return { text: 'recording', warn: false }
+}
+
+/** Claude Code's data folder for this copy of the plugin (what hooks get as
+ * CLAUDE_PLUGIN_DATA; a mod doesn't): `<config>/plugins/data/<name>-<marketplace>`
+ * for an installed copy (`<config>/plugins/cache/<marketplace>/<name>/<version>`),
+ * else `<configDir>/plugins/data/<name>-inline` (`--plugin-dir`), '' when
+ * neither is known. env.sh uses it only until SessionStart recorded the env
+ * (rt/<session>): the mod's session.start runs before that classic hook. */
+export function pluginDataDir(root: string, name: string, configDir: string): string {
+  const safe = (s: string) => s.replace(/[^A-Za-z0-9_-]/g, '-')
+  const m = /^(\/.*)\/plugins\/cache\/([^/]+)\/([^/]+)\/[^/]+\/?$/.exec(root)
+  if (m) return `${m[1]}/plugins/data/${safe(m[3]!)}-${safe(m[2]!)}`
+  return configDir.startsWith('/') && name ? `${configDir.replace(/\/+$/, '')}/plugins/data/${safe(name)}-inline` : ''
+}
+
 /** HH:MM:SS of an ISO-ish time (`2026-10-19T19:12:00+0200` or `...Z`). */
 export function clockOf(iso: string): string {
   const m = /T(\d\d:\d\d:\d\d)/.exec(iso || '')

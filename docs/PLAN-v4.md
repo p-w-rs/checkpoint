@@ -287,6 +287,17 @@ config: "installed copies"; macOS = Claude Code 2.1.301, VM = the Debian VM's 2.
    suite 955 (sh), 949 (dash); mod tests 46; 2 of 2 mutations; TUI (macOS) gateway 27/27,
    journal 20/20, recovery 40/40. Not run: the Debian VM, a real gateway policy refusal in a
    session.
+   *GitHub install test fixes (2026-10-21, 0.7.3)*: the first status draw came before the classic
+   SessionStart hook recorded the env, so a first run said "recording" while it built (a fast
+   build never showed "setting up"); `env.sh state` answers until then (and tells a failed setup
+   and a missing pixi from a build), with looks 0.3 s and 1 s after the start. The mod's pause
+   looked for the gateway's contract file under `$HOME`, not the password database's home
+   (`env.sh contract-path` now, as `gateway.contract_path`). The first-use notice has no fixed
+   time. Claude Code draws every plugin status line with a warning sign and `$.ui.status` has no
+   level, so the normal states are a dim footer mode label (`SessionMode`) and the status line
+   holds a pause and failures. Validated: suite 961 (sh), 955 (dash; two earlier dash runs failed
+   only the fast-path timing under load); mod tests 61; 3 of 3 mutations; TUI first use (installed,
+   and `--plugin-dir` with an empty pixi cache): setting up, then recording, no warning sign.
 
 ## Rules for this work
 

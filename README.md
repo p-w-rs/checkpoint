@@ -103,11 +103,21 @@ the Code tab click **+** → **Plugins** → **Add plugin** and choose **check**
 
 Then **start a new session** (or run `/reload-plugins`) and try `/check:help`.
 The first session builds the plugin's Python with pixi in the background
-(`pixi install --locked`: exactly the versions in its lock); it takes a few
-seconds to a minute and says so once ("first-time setup is running"; the
-status line: `check: setting up its runtime (first run); pausing works`).
-Pausing works meanwhile. If Claude Code quits during the setup, the next
-session finishes it. If pixi can't be found, the session says so.
+(`pixi install --locked`: exactly the versions in its lock); it takes
+seconds on a fast network, longer on a slow one, and says so once
+("first-time setup is running in the background"; the prompt footer:
+`check: setting up its runtime (first run); pausing works`, then `check:
+recording`). Pausing works meanwhile. If Claude Code quits during the setup,
+the next session finishes it. If pixi can't be found, the session says so.
+
+Where checkpoint shows its state (with mods): the normal states as a dim
+label at the right of the prompt footer (`check: recording`, `check: setting
+up its runtime (first run); pausing works`, `check: recording · updating its
+runtime in the background`), and only what needs you on Claude Code's status
+line under the prompt, which Claude Code draws with a warning sign for every
+plugin: `check: paused · type a message or /check:resume to resume`,
+`recording FAILED · /check-doctor`, `runtime setup FAILED`, `no runtime: pixi
+not found`, `state unknown`.
 
 Nothing is added to your settings (Claude Code records the install itself, as
 for any plugin).
@@ -126,8 +136,8 @@ From a shell (in Claude Code, `/plugin` opens the same actions as a menu):
 
 An update installs the new version next to the old one; when it changed the
 runtime (a new `pixi.lock`), the new one builds in the background while
-checkpoint keeps running on the previous one (the status line says
-"recording · updating its runtime in the background"). Updating works from
+checkpoint keeps running on the previous one (the prompt footer says
+"check: recording · updating its runtime in the background"). Updating works from
 any later shell; no special PATH or wrapper is needed beyond git for
 `marketplace update`. `uninstall` deletes the plugin's data folder
 (`~/.claude/plugins/data/check-checkpoint`, or under `$CLAUDE_CONFIG_DIR`:

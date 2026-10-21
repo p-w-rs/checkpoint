@@ -465,6 +465,22 @@ ck_degraded() {
     ck_write "$st/degraded/$1" "$(ck_now) $2"
 }
 
+# Where the gateway's daemon writes its discovery file (CONTRACT-v1), as
+# Python's gateway.contract_path: CHECKPOINT_GATEWAY_CONTRACT (set but empty:
+# '', the integration is off), else ~/.config/gateway/run/contract.json in the
+# password database's home (the gateway's; Claude Code may run with HOME
+# elsewhere). Computes the path only (the mod asks env.sh contract-path).
+ck_contract_path() {
+    if [ "${CHECKPOINT_GATEWAY_CONTRACT+set}" = set ]; then
+        case $CHECKPOINT_GATEWAY_CONTRACT in
+        '' | /*) printf '%s' "$CHECKPOINT_GATEWAY_CONTRACT" ;;
+        *) printf '%s/%s' "$(pwd)" "$CHECKPOINT_GATEWAY_CONTRACT" ;;
+        esac
+    else
+        printf '%s/.config/gateway/run/contract.json' "$(ck_user_home)"
+    fi
+}
+
 # ck_contract PATH: the gateway's discovery file (CONTRACT-v1) as one line,
 # "<status>: <words>", with the statuses and order of checks of Python's
 # gateway.discover (off, absent, unsafe, unreadable, dead, unknown_contract,

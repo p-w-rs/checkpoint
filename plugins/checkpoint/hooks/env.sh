@@ -9,6 +9,7 @@
 #   env.sh run ARGS...       run.py ARGS... now, or exit 75 when no runtime is ready (the mod)
 #   env.sh doctor [SESSION]  the runtime half of /check:doctor, without Python
 #   env.sh state             ready | older | building | failed | nopixi | missing
+#   env.sh contract-path     where the gateway's discovery file is (the mod; nothing reads it)
 #   env.sh flag pause SESSION [WHO]   pause flag, written whole (the mod)
 #   env.sh flag now SESSION           `pause now` request for the session's watcher
 #   env.sh flag noresume SESSION      the next prompt doesn't resume (the mod: isMeta,
@@ -46,7 +47,7 @@ mcp | cli)
         ck_kick retry
         i=0
         if [ "$mode" = mcp ]; then n=25; else n=180; fi
-        [ "$mode" = cli ] && echo "checkpoint: setting up its runtime (first run; about a minute)..." >&2
+        [ "$mode" = cli ] && echo "checkpoint: setting up its runtime (first run; usually under a minute)..." >&2
         s=
         while [ "$i" -lt "$n" ] && ! ck_python; do
             # No pixi: nothing to wait for. A failed build: give the retry
@@ -160,12 +161,14 @@ doctor)
     # The gateway's discovery file (CONTRACT-v1), checked as Python's
     # gateway.discover checks it (tests compare the verdicts): set but empty
     # turns the integration off.
-    if [ "${CHECKPOINT_GATEWAY_CONTRACT+set}" = set ]; then
-        gw=$CHECKPOINT_GATEWAY_CONTRACT
-    else
-        gw="$(ck_user_home)/.config/gateway/run/contract.json"
-    fi
-    echo "gateway contract: $(ck_contract "$gw")"
+    echo "gateway contract: $(ck_contract "$(ck_contract_path)")"
+    ;;
+
+contract-path)
+    # The path alone (the mod's pause asks: mods can't read the password
+    # database); '' when the integration is off. Nothing looks at the file.
+    ck_contract_path
+    echo
     ;;
 
 flag)
@@ -194,7 +197,7 @@ spool)
     ;;
 
 *)
-    echo "usage: env.sh ensure | mcp | cli ARGS | doctor [SESSION] | state | flag ... | spool SESSION EVENT" >&2
+    echo "usage: env.sh ensure | mcp | cli ARGS | doctor [SESSION] | state | contract-path | flag ... | spool SESSION EVENT" >&2
     exit 2
     ;;
 esac

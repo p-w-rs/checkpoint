@@ -85,7 +85,7 @@ atexit.register(cleanup)
 MAIN_CLAUDE = fake_claude()
 os.environ["CLAUDE_PID"] = str(MAIN_CLAUDE.pid)  # what Claude Code exports to hooks
 
-from checkpoint import __version__, core, hooks, jobs, mcp_server, procs, state, tracker, transcript  # noqa: E402
+from checkpoint import __version__, core, gateway, hooks, jobs, mcp_server, procs, state, tracker, transcript  # noqa: E402
 
 PASS = 0
 FAIL = 0
@@ -2685,6 +2685,10 @@ took = time.time() - t0
 msg = sys_msg(r)
 check(f"no env yet: SessionStart answers at once ({took:.2f} s) and says first-time setup is running",
       took < 2.5 and "first-time setup is running" in msg and "Pausing works meanwhile" in msg)
+check("...with no fixed time (0.7.3: it said 'about a minute'; seconds on a fast network, longer on a slow one)",
+      "about a minute" not in msg and "usually under a minute" in msg
+      and not [f for f in ("hooks/fast.sh", "hooks/env.sh", "skills/help/SKILL.md", "hooks/mod/register.tsx")
+               if "about a minute" in (ROOT / f).read_text() or "in a minute" in (ROOT / f).read_text()])
 check("...and starts the build in the background (fake pixi called with the data folder's manifest)",
       wait_for(lambda: any(c.startswith(f"install --locked --manifest-path {ENVD6}/") for c in pixi_calls(E6)), 10))
 check("...rt/<session> records the env for the other hooks and the mod",
@@ -2980,6 +2984,46 @@ check("...the gateway's contract file (CHECKPOINT_GATEWAY_CONTRACT in tests) is 
       "does: '{}' names no daemon pid, so not available (dead); tests/gateway_tests.py covers every status",
       "gateway contract: dead: its contract file names no daemon pid" in d.stdout)
 GWC.unlink()
+# env.sh contract-path: where the mod's pause looks for the gateway (0.7.3; it
+# used $HOME, so with HOME elsewhere the ack said the gateway wasn't told). It
+# only prints the path (mods can't read the password database).
+
+
+def contract_path_sh(env, cwd=None):
+    return subprocess.run([SH, str(ROOT / "hooks" / "env.sh"), "contract-path"], capture_output=True, text=True,
+                          env=env, cwd=cwd)
+
+
+_cp = contract_path_sh(E1)
+check("env.sh contract-path: CHECKPOINT_GATEWAY_CONTRACT when set (the tests' scratch path), as gateway.contract_path",
+      _cp.returncode == 0 and _cp.stdout == os.environ["CHECKPOINT_GATEWAY_CONTRACT"] + "\n"
+      and gateway.contract_path() == os.environ["CHECKPOINT_GATEWAY_CONTRACT"])
+_cp = contract_path_sh(dict(E1, CHECKPOINT_GATEWAY_CONTRACT=""))
+check("...set but empty: an empty line (the integration is off)", _cp.returncode == 0 and _cp.stdout == "\n")
+_cp = contract_path_sh(dict(E1, CHECKPOINT_GATEWAY_CONTRACT="rel dir/c.json"), cwd=str(TMP))
+check("...a relative one: from the current folder (Python's abspath)",
+      _cp.stdout.strip() == os.path.join(os.path.realpath(TMP), "rel dir", "c.json")
+      or _cp.stdout.strip() == os.path.join(str(TMP), "rel dir", "c.json"))
+_e = {k: v for k, v in E1.items() if k != "CHECKPOINT_GATEWAY_CONTRACT"}
+_e["HOME"] = str(TMP / "not-home")
+_cp = contract_path_sh(_e)
+_gwc, _home = os.environ.pop("CHECKPOINT_GATEWAY_CONTRACT"), os.environ.get("HOME")
+os.environ["HOME"] = str(TMP / "not-home")
+try:
+    _py = gateway.contract_path()   # computes the path only; nothing looks at the file
+finally:
+    os.environ["CHECKPOINT_GATEWAY_CONTRACT"] = _gwc
+    if _home is None:
+        os.environ.pop("HOME", None)
+    else:
+        os.environ["HOME"] = _home
+_real_cp = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".config", "gateway", "run", "contract.json")
+check("...unset, with HOME elsewhere: ~/.config/gateway/run/contract.json in the password database's home, the "
+      "same path as gateway.contract_path (and the gateway), not $HOME's (computed only)",
+      _cp.returncode == 0 and _cp.stdout.strip() == _real_cp == _py and "not-home" not in _cp.stdout)
+check("...the mod asks env.sh contract-path (no $HOME guess left in it)",
+      "'contract-path'" in (ROOT / "hooks" / "mod" / "register.tsx").read_text()
+      and "/.config/gateway/run/contract.json" not in (ROOT / "hooks" / "mod" / "register.tsx").read_text())
 out = hook("UserPromptSubmit", dict(pm, prompt="/check:doctor"), EM)
 check("/check:doctor through the hook: the same report, with Python's own line",
       "checkpoint " + __version__ + " doctor" in ctx(out) and "runtime:" in ctx(out))

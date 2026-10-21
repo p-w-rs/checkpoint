@@ -3,7 +3,7 @@
 // file system in memory, hooks/env.sh simulated (flag writes, doctor), the
 // session, the turn and the tool calls.
 import { expect, test } from 'claude-code/testing'
-import { COMPOSER, deniedText, FLAG, HOME, PRESENT, ROOT, SID, settle, start, world } from './world.ts'
+import { COMPOSER, deniedText, FLAG, footer, HOME, PRESENT, ROOT, SID, settle, start, world } from './world.ts'
 import { ackText, allowedTool, insideWorkDir, jobLive, parseSelfArgs, parseSelfPause, safeId, typedResumes } from '../../hooks/mod/logic.ts'
 
 test('pure helpers agree with the Python side', async () => {
@@ -34,8 +34,10 @@ test('registers /check-pause, /check-doctor, /check-save, /check-list, /check-re
   await start($)
   expect(w.registered.map(r => [r.name, r.immediate])).toEqual([['check-pause', true], ['check-doctor', true], ['check-save', true], ['check-list', true],
     ['check-resume', true], ['check-cancel', true], ['check-stop', true], ['check-diff', true]])
-  await settle(w, () => w.statuses.length > 0)
-  expect(w.statuses.at(-1)).toBe('recording')
+  await settle(w, () => false)
+  // A normal state: the footer's dim mode label, not the status line (its warning sign).
+  expect(await footer($, w)).toEqual(['focus', 'check: recording'])
+  expect(w.statuses).toEqual([])
 })
 
 test('/check-pause mid-turn: flag written, turn aborted, ack says what still runs, next calls denied', async ($, on) => {

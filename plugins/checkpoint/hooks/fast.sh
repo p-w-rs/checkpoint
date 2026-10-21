@@ -339,7 +339,7 @@ degraded_session() {
     case $(ck_state) in
     nopixi) msg="checkpoint: pixi not found, so checkpoint can't set itself up (no trackers or job tools; pausing still works). Install pixi from https://pixi.sh, then restart Claude Code." ;;
     failed) msg="checkpoint: setting up its runtime failed ($(ck_fail_line)); it is retried at every session start. Pausing still works; /check:doctor has details (log: $ENVD/install.log)." ;;
-    *) msg="checkpoint: first-time setup is running (about a minute). Pausing works meanwhile; trackers and the job tools start once it is done." ;;
+    *) msg="checkpoint: first-time setup is running in the background (usually under a minute). Pausing works meanwhile; trackers and the job tools start once it is done." ;;
     esac
     ctx="checkpoint (plugin) is still setting up its runtime, so its tracker notes and job tools aren't available yet. If a tool call is denied because the session is paused, don't start new work: end your turn with one line saying you're paused."
     paused && ctx="$ctx This session is PAUSED. The user's next message resumes it."

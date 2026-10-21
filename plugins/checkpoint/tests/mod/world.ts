@@ -10,6 +10,8 @@ export const HOME = '/state'
 export const SID = 'sess-1'
 export const FLAG = `${HOME}/flags/${SID}`
 export const ROOT = '/proj'
+/** The password database's home (env.sh contract-path reads it); $HOME is elsewhere. */
+export const USER_HOME = '/users/u'
 
 export type World = {
   files: Map<string, string>
@@ -26,6 +28,15 @@ export type World = {
   events: string[]
   opened: string[]
   closed: string[]
+  /** What `env.sh state` answers; undefined: it fails (the mod keeps what the files say). */
+  shell?: string
+  /** The env each `env.sh state` ran with. */
+  stateEnvs: Record<string, string>[]
+  /** What `env.sh contract-path` answers (exit 1 when undefined). */
+  contractPath?: string
+  /** The footer's mode labels as the last SessionMode drawing passed them down. */
+  modes: string[]
+  env: Record<string, string>
 }
 
 /** A finished process as $.process.run answers it. */
@@ -58,9 +69,10 @@ export function world(on: On, opts: { flagFails?: boolean; writeFails?: boolean;
   const w: World = {
     files: new Map(), runs: [], aborts: [], statuses: [], logs: [], registered: [], calls: [],
     release: new Map(), noresumeSeen: [], clock: mock.clock(on), submitted: [], events: [], opened: [], closed: [],
+    stateEnvs: [], contractPath: `${USER_HOME}/.config/gateway/run/contract.json`, modes: [],
+    env: { CHECKPOINT_HOME: HOME, HOME: '/home/u' },
   }
-  const env: Record<string, string> = { CHECKPOINT_HOME: HOME, HOME: '/home/u' }
-  on('env.get', ($, e) => ({ value: env[e.name] }))
+  on('env.get', ($, e) => ({ value: w.env[e.name] }))
   on('session.id', () => ({ value: SID }))
   on('session.cwd', () => ({ value: ROOT }))
   on('session.root', () => ({ value: ROOT }))
@@ -93,6 +105,11 @@ export function world(on: On, opts: { flagFails?: boolean; writeFails?: boolean;
       if (what === 'clear-noresume') w.files.delete(`${HOME}/noresume/${sid}`)
       return ok
     }
+    if (mode === 'state') {
+      w.stateEnvs.push({ ...(e.init?.env ?? {}) } as Record<string, string>)
+      return w.shell === undefined ? ran(1, '', 'no answer') : ran(0, `${w.shell}\n`)
+    }
+    if (mode === 'contract-path') return w.contractPath === undefined ? ran(1, '', 'no answer') : ran(0, `${w.contractPath}\n`)
     if (mode === 'run' && opts.answers?.[rest[0] ?? '']) return opts.answers[rest[0]!]!(rest)
     if (mode === 'doctor') return ran(0, 'pixi: /bin/pixi (0.81.0; in the tested range 0.68.0 to 0.82.0)\nruntime: ready\ngate: normal\n')
     if (mode === 'run' && rest[0] === 'status') return ran(0, 'Sessions:\n- sess-1  working/idle\n')
@@ -126,6 +143,11 @@ export function world(on: On, opts: { flagFails?: boolean; writeFails?: boolean;
   on('ui.log', ($, e) => {
     w.logs.push(e.text)
     return { value: undefined }
+  })
+  on('ui.render', { component: 'SessionMode' }, ($, e) => {
+    w.modes = [...e.props.modes]
+    // As Claude Code draws them: dim, joined by ` & `.
+    return { type: 'Text' as const, props: { dimColor: true }, children: [e.props.modes.join(' & ')] }
   })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
@@ -161,6 +183,13 @@ export const COMPOSER = { kind: 'composer' } as const
 
 export async function start($: any) {
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+}
+
+/** The footer's mode labels now (a SessionMode drawing; Claude Code's own: `focus`). */
+export async function footer($: any, w: { modes: string[] }): Promise<string[]> {
+  const ui = await $.ui.mount({ plugin: 'check', surface: 'terminal', component: 'SessionMode', props: { modes: ['focus'] } })
+  await ui.unmount()
+  return w.modes
 }
 
 export async function settle(w: World, until: () => boolean) {

@@ -64,8 +64,8 @@ resume ───────▶ a typed message / /check:resume [task|checkpoint
 | `hooks/watch.sh` | One per running foreground Bash call. Every 2 s: a queued `pause now` or `now/<sid>`? Then `run.py watch-fire`. Exits when PostToolUse removes `running/<id>.json`, when the call's `tool_result` is in the transcript (a cancelled or denied call fires no PostToolUse; a subagent's goes to its own transcript), or when Claude exits. |
 | `hooks/pixi.sh` | Finds pixi on PATH or in the usual install folders (`$PIXI_HOME/bin`, `~/.pixi/bin`, `~/.local/bin`, Homebrew, MacPorts, Linuxbrew) and execs it. |
 | `hooks/lib.sh` | Sourced by the sh scripts: where the runtime lives (`ck_env`), whether it is ready, the previous env during an update, running `run.py` with it (`ck_exec_py`: `-I -S -X pycache_prefix=$DATA/pycache`), the build lock with live owners, the build (`pixi install --locked`), warming, cleanup, the background kick, `ck_state`, atomic writes, `degraded/<sid>`. |
-| `hooks/env.sh` | `ensure` (the async SessionStart hook and the kick), `mcp` (the MCP server's launcher: starts a build and waits up to 25 s), `cli` (the terminal helper), `run` (the mod: Python now or exit 75), `doctor` (the runtime half of /check:doctor, no Python), `state`, `flag` (the mod's atomic flag writes: pause, now, noresume). |
-| `hooks/mod/register.tsx` | The mod: `/check-pause [now]` and `/check-doctor` (immediate), answers `/check:pause [now]`, `/check:doctor` and `/check:status` without a model turn, the `tool.call` gate (fails closed), the no-self-resume mark, `pause` typed over a running turn, the status line. State on disk only (flags/, rt/, jobs.json); module variables hold the running turn and the calls in flight. |
+| `hooks/env.sh` | `ensure` (the async SessionStart hook and the kick), `mcp` (the MCP server's launcher: starts a build and waits up to 25 s), `cli` (the terminal helper), `run` (the mod: Python now or exit 75), `doctor` (the runtime half of /check:doctor, no Python), `state` (also the mod's status before SessionStart recorded the env), `contract-path` (where the gateway's discovery file is, for the mod's pause), `flag` (the mod's atomic flag writes: pause, now, noresume). |
+| `hooks/mod/register.tsx` | The mod: `/check-pause [now]` and `/check-doctor` (immediate), answers `/check:pause [now]`, `/check:doctor` and `/check:status` without a model turn, the `tool.call` gate (fails closed), the no-self-resume mark, `pause` typed over a running turn, its state (normal ones as a footer mode label, a pause or a failure on the status line). State on disk only (flags/, rt/, jobs.json); module variables hold the running turn and the calls in flight. |
 | `hooks/mod/logic.ts` | Its pure helpers (ids, the allow list, the pause forms, texts), checked against Python by the suite. |
 | `state.py` | State dir layout (see its docstring), flock, atomic JSON writes, pause flags, the fixed settings, live sessions (newest record per running Claude pid), the queued-command memory (`queue_handled`, the `queued_pauses` list + `queued/<sid>`), the trackers each session wrote, pruning (skipped without a process table), and migrating 0.1's global `paused-all` file. |
 | `transcript.py` | Transcript tail; replays `queue-operation` enqueue/dequeue/remove to find the pending pause commands (oldest first), and (over the whole file) what became of a handled one: still pending, dequeued or removed; tool results; Bash commands and recent tool calls. |
@@ -418,7 +418,11 @@ the session's `gateway_paused`; one decision at a time per session:
 outcome, and returns the line the pause shows. Every pause route reaches
 it: `core.pause` (typed `pause`, `/check:pause`), the mod's `/check-pause`
 (`run.py gw-pause`, whose line goes into the ack, beside `sync-pause`: the
-lock makes it one delivery). The task's live gateway jobs that other
+lock makes it one delivery). The mod asks only when the discovery file is
+there, and finds it where Python does (`env.sh contract-path`:
+`CHECKPOINT_GATEWAY_CONTRACT`, else the password database's home, which a
+mod can't read; 0.7.3: it looked under `$HOME`, so with HOME elsewhere the
+ack said the gateway wasn't told); when the shell can't say, Python decides. The task's live gateway jobs that other
 sessions started (`_pause_others`): a session whose Claude process has
 ended gets its own `/v1/pause` with the task_ref (remembered in
 `gateway_paused.others`, resumed with this session); a session still open,
@@ -600,10 +604,26 @@ keeps running (the code is stdlib only); envs unused for 7 days are removed.
 - **Who builds.** The async SessionStart hook (`env.sh ensure`), and the sync
   SessionStart, which never waits: with no env it starts a detached build,
   says "first-time setup is running" once, and answers fail-safe meanwhile.
-  While an update's env builds the previous one runs: the mod's status line
-  says "recording · updating its runtime in the background", and its Python
+  While an update's env builds the previous one runs: the mod says
+  "recording · updating its runtime in the background", and its Python
   commands (`/check-save`, `/check-list`, ...) use it (0.7.1; they used to
   say "first run" and refuse).
+- **What the mod shows** (0.7.3). Its first draw comes before the classic
+  SessionStart hook has recorded the env (`rt/<sid>`; the mod's session.start
+  runs first, measured on 2.1.301): until then `env.sh state` answers, in
+  this copy's data folder (`logic.pluginDataDir`: `<config>/plugins/data/
+  <name>-<marketplace>` for an installed copy, `<name>-inline` for
+  `--plugin-dir`; a mod doesn't get `CLAUDE_PLUGIN_DATA`), so a first run says
+  "setting up its runtime (first run); pausing works" from the first draw
+  (0.7.2 said "recording" while it built, and a two-second build never
+  showed the setup); it looks again 0.3 s and 1 s after the start, then every
+  2 s. The shell also tells a failed setup and a missing pixi from a build.
+  Claude Code draws every plugin status line (`$.ui.status`, which takes
+  only the text: no level) with a warning sign, so the normal states
+  (recording, setting up, updating) are a dim label in the prompt footer (a
+  `ui.render` hook on `SessionMode` adds `check: <state>`), and the status
+  line holds only what needs the person: paused, recording FAILED, setup
+  FAILED, no pixi, unknown (`logic.statusOf`).
 - **Deadlines.** Every hook that waits for Python (SessionStart, a prompt or
   tool call that needs it, PostToolUse's reminder, Stop) stops it at
   `CHECKPOINT_HOOK_DEADLINE` (20 s; Claude Code's own limits are 30 and
@@ -681,7 +701,8 @@ acknowledgement reports):
 
 In every run the pause flag was written, the status line switched from
 `check: recording` to `check: paused · ...`, and the next message typed
-resumed (flag cleared, status back to recording). The driver is
+resumed (flag cleared, status back to recording). (Since 0.7.3 `check:
+recording` is the footer's label and the status line shows only the pause.) The driver is
 `scratchpad/upgrade/ck-pack/drv/ckpause.py` of the v4 work (built on the
 prototype in `scratchpad/upgrade/tui/`; outside the repo); the repo's own TUI
 harness is `tests/tui/`.

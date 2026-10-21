@@ -1,6 +1,6 @@
 # CLAUDE.md: working on checkpoint
 
-The plugin (`plugins/checkpoint/`, v0.7.2; plugin name `check`, marketplace
+The plugin (`plugins/checkpoint/`, v0.7.3; plugin name `check`, marketplace
 `checkpoint`, install key `check@checkpoint`). User docs and the install
 route: [README.md](README.md). How it fits together:
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Why, the user's decisions, and
@@ -14,7 +14,10 @@ gateway integration (CONTRACT-v1 client, jobs delegated to the gateway,
 per-job pause policies, unknown states): 0.6.0; the last build step
 (reconciliation against the gateway's hosts, authorization references,
 idempotent pause retries with pause ids): 0.7.0; the acceptance fixes:
-0.7.1; a gateway refusal never runs a job in the own runner: 0.7.2), with
+0.7.1; a gateway refusal never runs a job in the own runner: 0.7.2; the
+GitHub install test's fixes (a truthful first status, the gateway's contract
+file in the password database's home for the mod too, the state's normal
+forms in the footer): 0.7.3), with
 the gateway contract
 in [docs/CONTRACT-v1.md](docs/CONTRACT-v1.md) (identical to the gateway's
 copy; `gateway.py` is its client).
@@ -39,10 +42,12 @@ plugins/checkpoint/
   hooks/fast.sh, watch.sh           POSIX sh: pre-filter, the spool (every event), the gate's fail-safe
                                     half, `pause now` watcher
   hooks/lib.sh, env.sh, pixi.sh     the runtime (env in plugin data by lock hash, build lock, launcher,
-                                    doctor, flag writes and `spool` for the mod), ck_spool/ck_hash; pixi finder
+                                    doctor, flag writes, `spool`, `state` and `contract-path` for the mod),
+                                    ck_spool/ck_hash; pixi finder
   hooks/mod/register.tsx, logic.ts  the mod: /check-pause, /check-save, /check-list (+ the Checkpoints
                                     pane), /check-resume, /check-cancel, /check-stop, /check-diff,
-                                    /check-doctor, status line, fail-closed tool gate, no self-resume,
+                                    /check-doctor, its state (normal ones as a SessionMode footer label, a
+                                    pause or failure on the status line), fail-closed tool gate, no self-resume,
                                     turn/compaction/denial events to the spool, the 20 s ingest timer, the
                                     250 ms resume-prompt timer; /check:pause|save|doctor|status answered
                                     without a model turn; a tool.check observer (permission verdicts) and
@@ -107,7 +112,44 @@ pixi exec --spec python=3.12 --spec pyte python tests/acceptance_independence.py
 pixi exec --spec python=3.12 --spec pyte python tests/acceptance_durability.py --tmp <dir> --pixi-cache <dir>   # 14.11 (~2 min)
 ```
 
-Last full run (2026-10-21, 0.7.2, the gateway-refusal security fix): the
+Last full run (2026-10-21, 0.7.3, the GitHub install test's fixes): the
+suite 961 passed (macOS, sh = bash 3.2), under dash 955 (two earlier dash
+runs failed only the fast-path overhead timing: sequential medians,
+PreToolUse 47.6 -> 60.1 ms, with the machine at load 8-10 from other users'
+processes; interleaved on a scratch copy, 60 runs each: +0.2 ms PreToolUse
+and PostToolUse; the third run +0.9 ms); `claude plugin test .` 61 passed (new
+`tests/mod/status.test.ts`: 15); `validate` passes for the plugin and the
+marketplace; the mod typechecks (tsc, 2.1.301's shipped types). The fixes:
+the first status draw read `rt/<sid>` before the classic SessionStart hook
+wrote it, so it said "recording" while a first run built (and a two-second
+build never showed the setup): now, not ready by the files or not recorded
+yet, `env.sh state` answers (`CHECKPOINT_PLUGIN_DATA` from
+`logic.pluginDataDir` until the env is recorded), with looks 0.3 s and 1 s
+after the start; the mod's pause looked for the gateway's contract file
+under `$HOME` (the gateway and Python use the password database's home), so
+with HOME elsewhere the ack said the gateway wasn't told: now `env.sh
+contract-path` (Python decides when the shell can't say); the first-use
+notice says "usually under a minute" (no fixed time); `$.ui.status` has no
+level (2.1.299 and 2.1.301 types) and Claude Code draws every plugin status
+line with a warning sign, so the normal states (recording, setting up,
+updating) are a dim footer mode label (a `SessionMode` render hook) and the
+status line holds only a pause and failures (setup FAILED and no pixi are
+new states there). Mutations (each on a scratch copy; 3 of 3): the old
+first draw (an unrecorded env counted as recording, no shell: 5 mod tests
+failed), the contract file under `$HOME` again (3), every state on the
+status line (9). TUI (macOS 2.1.301, scratch config, fake API; a scratch
+script on `tests/tui`, sampling every 0.1 s from the spawn): a git-snapshot
+install with a warm pixi cache: `check: setting up its runtime (first run);
+pausing works` (footer, no warning sign) at 0.44 s, the env ready at 0.77 s,
+`check: recording` at 0.77 s; `--plugin-dir` with an empty pixi cache
+(downloaded): setting up at 0.67 s, ready at 2.17 s, recording at 2.59 s;
+both 6/6 (the notice's wording, `/check-pause` on the warning line with no
+footer label, a typed message back to the footer label). Not run this
+round: the Debian VM, the acceptance scripts (their `check: recording` and
+`check: paused` matches still hold: footer row and status line), a TMPDIR
+of ~180 characters, and the gateway's acceptance_install (its status-row
+parser expects `⚠ check: recording`).
+Before (2026-10-21, 0.7.2, the gateway-refusal security fix): the
 suite 955 passed (macOS, sh = bash 3.2), under dash 949 (one earlier dash run
 failed only the fast-path overhead timing, 11.6 ms against 10, with another
 agent's TUI runs loading the machine; the rerun passed); `claude plugin test
@@ -689,7 +731,28 @@ needs a new spike.
   prompt box.
 - The mod can't see `CLAUDE_PLUGIN_DATA` (Claude Code sets it for hooks and
   MCP servers only; `--plugin-dir` gets `plugins/data/check-inline`):
-  SessionStart records the env folder in `rt/<sid>` for it.
+  SessionStart records the env folder in `rt/<sid>` for it. The mod's
+  session.start (and its first status draw) runs before the classic
+  SessionStart hook writes `rt/<sid>` (measured, GitHub install test): until
+  then `env.sh state` answers with `CHECKPOINT_PLUGIN_DATA` from
+  `logic.pluginDataDir` (`<config>/plugins/data/<name>-<marketplace>` from an
+  installed copy's cache path, else `<name>-inline`), and the status is
+  looked at again 0.3 s and 1 s after the start (0.7.2 drew "recording"
+  while a first run built; a two-second build never showed the setup).
+- `$.ui.status(text)` takes only the text (2.1.299 and 2.1.301 types; no
+  level or kind) and Claude Code draws every plugin status line as a pinned
+  notice with a warning sign ("⚠ check: recording", "⚠ gate: ready"). The
+  normal states are a dim footer mode label instead: a `ui.render` hook on
+  `SessionMode` appends `check: <state>` to `e.props.modes` (drawn at the
+  right of the prompt footer; `$.ui.invalidate('ui.render')` when it
+  changes; a mod test reads it through `$.ui.mount` of `SessionMode` with a
+  bottom hook that returns a Text element). The status line keeps a pause
+  and the failures (`logic.statusOf`). TUI tests matching `check: recording`
+  in the screen text still find it (the footer row).
+- The mod can't read the password database: the gateway's contract file
+  (in that home, as `gateway.contract_path`) comes from `env.sh
+  contract-path` (0.7.3; it used `$HOME`, so with HOME elsewhere the
+  `/check-pause` ack said the gateway wasn't told).
 - A `$` call a mod begins after its hook returned is refused: the mod's
   spool events start their `process.run` synchronously inside the hook and
   nobody waits for them. `session.compact` hooks are skipped when `next()`
