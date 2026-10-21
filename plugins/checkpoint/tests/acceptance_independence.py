@@ -23,7 +23,7 @@ print) under the session's environment.
   both      both: checkpoint sees the gateway (contract v1, features) and
             hands its job to the gateway (owner gateway)
   ckoff     both installed, checkpoint disabled: the gateway works alone
-            (managed bash, a gw job), no checkpoint status line, nothing
+            (managed bash, a gw job), no checkpoint label or status line, nothing
             journaled for that session; enabled again: recording
   gwoff     both installed, the gateway disabled: (a) its daemon still running
             from the earlier sessions (it idles for 30 min): what checkpoint
@@ -324,7 +324,7 @@ def part_ckalone(root: Path, env: dict) -> None:
         s = box.session("alone")
         try:
             s.wait_ready(120)
-            check("[ckalone] checkpoint records (status line)", wait(s, lambda: "check: recording" in s.text(), 60))
+            check("[ckalone] checkpoint records (footer label)", wait(s, lambda: "check: recording" in s.text(), 60))
             gw = box.ck_cli(s, "gateway")
             SUMMARY["ckalone_gateway"] = gw.splitlines()[:2]
             check("[ckalone] checkpoint says the gateway is not available and why, and where jobs run",
@@ -357,7 +357,7 @@ def part_gwalone(root: Path, env: dict, gsrc: Path) -> None:
             check("[gwalone] Bash runs in the gateway's managed bash", m.startswith("managed|5."), m)
             if check("[gwalone] the gw job tool is offered", offer(s, GW_JOB)):
                 check("[gwalone] a gw job_start runs (the gateway supervises it alone)", gw_job(s, 2))
-            check("[gwalone] no checkpoint status line, no checkpoint state anywhere",
+            check("[gwalone] no checkpoint footer label or status line, no checkpoint state anywhere",
                   "check:" not in s.text() and not box.home.exists())
             dbg = s.debug_path.read_text(errors="replace") if s.debug_path.exists() else ""
             check("[gwalone] no gateway hook failed in the debug log (it doesn't need checkpoint)",
@@ -414,7 +414,7 @@ def part_both_and_more(root: Path, env: dict, gsrc: Path, only: set[str]) -> Non
                 check("[ckoff] the gateway works alone: managed bash", m.startswith("managed|5."), m)
                 if offer(s, GW_JOB):
                     check("[ckoff] ...and a gw job runs", gw_job(s, 4))
-                check("[ckoff] no checkpoint status line in the session", "check:" not in s.text())
+                check("[ckoff] no checkpoint footer label or status line in the session", "check:" not in s.text())
             finally:
                 s.close()
             check("[ckoff] nothing was spooled or journaled by checkpoint for that session",

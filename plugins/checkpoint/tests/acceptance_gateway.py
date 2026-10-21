@@ -304,7 +304,7 @@ def steps(s: driver.Session, gi, home: Path) -> None:
     contract = gi.gateway_home / "run" / "contract.json"
     check("the gateway's daemon is up (its CONTRACT-v1 discovery file in the e2e home)",
           wait(s, contract.is_file, 120, 0.5))
-    check("checkpoint is recording (its status line)", wait(s, lambda: "recording" in s.text(), 60))
+    check("checkpoint is recording (its footer label)", wait(s, lambda: "recording" in s.text(), 60))
     # checkpoint's MCP server connects in the background: wait until its job tool is offered.
     offered = False
     for i in range(6):

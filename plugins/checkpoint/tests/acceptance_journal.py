@@ -149,7 +149,7 @@ def main() -> int:
                      permission_mode="bypassPermissions", extra_env=env, debug_file=True)
         try:
             s1.wait_ready(timeout=90)
-            check("session 1 reaches the prompt (status line: check: recording)",
+            check("session 1 reaches the prompt (footer label: check: recording)",
                   wait(s1, lambda: "recording" in s1.text(), 30))
             s1.submit("Build the widget so widget() returns 2. Constraint: never touch prod.")
             check("the scripted steps run up to a 6 s command", wait(s1, lambda: running("echo stage-one"), 90))

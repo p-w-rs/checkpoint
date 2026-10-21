@@ -123,7 +123,7 @@ def main() -> int:
                     permission_mode="default", debug_file=True)
         try:
             s.wait_ready(timeout=120)
-            check("the session reaches the prompt (status line: check: recording)",
+            check("the session reaches the prompt (footer label: check: recording)",
                   wait(s, lambda: "recording" in s.text(), 30))
             s.submit("make the four files")
             check("the allowed command runs without a dialog (the settings rule)",
