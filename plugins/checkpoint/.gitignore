@@ -1,3 +1,7 @@
 .pixi/
 __pycache__/
 *.pyc
+# Written by Claude Code when it loads the mod from this folder (--plugin-dir):
+# the API's type declarations, and a tsconfig.json that extends them
+.claude-plugin/types/
+/tsconfig.json

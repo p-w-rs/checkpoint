@@ -1,7 +1,13 @@
 # checkpoint: design
 
-Status: **built and installed** (v0.1.0, 2026-10-15); see
-[ARCHITECTURE.md](ARCHITECTURE.md). Spikes run 2026-10-15 on Claude Code
+Status: **built** (v0.1.0, 2026-10-15; v0.2.0, 2026-10-18: see "0.2.0
+revisions" at the end); see
+[ARCHITECTURE.md](ARCHITECTURE.md). Since 0.3.0 [PLAN-v4.md](PLAN-v4.md)
+supersedes this document where they differ (it lists each reversal): a
+native immediate pause exists (`/check-pause`), the hook-written journal is
+the record (the tracker stays as optional notes), the paused gate fails
+closed, only prompts the person typed resume, interrupted operations are
+classified instead of redone, and jobs go to the gateway when it is there. Spikes run 2026-10-15 on Claude Code
 2.1.277 (CLI) / 2.1.295 (desktop); see the Spikes section. Written from a
 planning conversation with the user; decisions below are theirs unless
 marked "recommended".
@@ -133,6 +139,53 @@ with:
   `CONDA_PREFIX` etc., our `.pixi/envs/*/bin` on PATH). Otherwise a job's own
   `pixi run` uses checkpoint's pixi.toml (`PIXI_PROJECT_MANIFEST` wins over the
   cwd). Another project's activation (a session under `pixi shell`) is kept.
+- **Jobs follow the gateway** when it is installed (user request,
+  2026-10-19). The gateway gives Claude's Bash its environment through
+  `CLAUDE_ENV_FILE` (stand-ins first on PATH, a git include,
+  `GIT_SSH_COMMAND`/`RSYNC_RSH`, the user's SSH agent and tokens unset),
+  which a job started from the MCP server never got. The gateway writes
+  the same text to `~/.config/gateway/env.sh` at every session start, so
+  the job's shell sources that file before the command (command and argv
+  jobs alike, after `job_env()`). Found the way the gateway finds it: the
+  password database's home, not `$HOME`; `CHECKPOINT_GATEWAY_ENV`
+  overrides it (tests; empty = none). No file: nothing changes, so
+  checkpoint still works alone.
+  - Sourced only if it is a regular file (not a symlink) the user owns
+    and nobody else can write, in a folder the user owns and nobody else
+    can write, so it can't be swapped between the check and the job's
+    shell. Otherwise `refused: <why>`, and the job runs without it.
+  - A broken file fails open, like the rest of checkpoint: one line in
+    the job's log and the job runs without it (`failed`). Failing closed
+    would turn a gateway problem into lost jobs, and without this feature
+    jobs never had the gateway's environment anyway. `. file || echo`
+    doesn't do this: dash (Debian's sh) exits on a sourced file's syntax
+    error, failing special builtin or missing file, so the job never ran,
+    and bash goes on with the lines before the error applied. So the
+    wrapper sources it in a subshell first, and applies it only if that
+    survived and printed nothing on stderr: all of the file or none.
+  - The registry's `gateway_env` (shown by `job_status` and status):
+    `applied`, `failed`, `refused: <why>`, `pending` until the shell
+    reports through `jobs/<id>/gateway_env`, `unknown` if it ended first;
+    absent when there is no file.
+  - Other plugins check jobs too (2026-10-19). checkpoint never allows
+    `job_start` (CLAUDE.md invariant 7), so other plugins' PreToolUse
+    hooks see it. The gateway judges a job's command like a Bash command:
+    it refuses `curl`/`wget`, its private folder and session transcripts,
+    rights set to `false` and any `"ask"` right (nobody can be asked while
+    a job runs), and never approves a job by itself. pixi-guard refuses
+    Python outside pixi. The gateway's PostToolUse hook masks what
+    `job_tail`, `job_status` and `job_stop` return; a failed `job_stop`
+    (an MCP error result with the job's last log lines) reaches no hook
+    that can rewrite it, so its PostToolUseFailure hook only warns. Both
+    match the tools by exact name (`mcp__plugin_check_jobs__job_start`
+    ...), so the plugin name `check`, the server name `jobs` and the tool
+    names are an interface (a test pins them). A job still running after
+    its Claude session ends can no longer use the gateway's keys,
+    passwords or git credentials, except from entries with
+    `scripts = true`, because the gateway can't tell it came from Claude
+    any more; keep the session open until such a job is done. See the
+    gateway README's "With checkpoint" and pixi-guard's README
+    ("Checkpoint jobs too").
 
 ## 3. Pause and resume
 
@@ -141,11 +194,11 @@ with:
 | Command | Effect |
 |---|---|
 | `/check:pause` | Pause this session at its next tool call (typed while busy; see "Queued commands" below), or right away if idle. |
-| `/check:pause all` | Pause every session on the machine. |
+| `/check:pause all` | Pause every running session on the machine (a flag per session; sessions started later aren't paused). |
 | `/check:pause now` | Also kill the session's running **foreground** command right away (see below). |
 | `/check:pause now --stop-jobs` | ...and stop its detached jobs too. |
 | `/check:resume` | Resume this session (see below). |
-| `/check:resume all` | Clear the global flag. |
+| `/check:resume all` | Un-pause every session; each gets its resume notes with its next message. |
 | `/check:resume <task>` | In a **new** session: pick up a task from its tracker alone. |
 | `/check:status` | Which sessions are paused / working, their tasks, jobs. |
 
@@ -174,12 +227,24 @@ message gets injected mid-turn instead). PreToolUse gets
 1. pre-filter (shell): flag file exists, **or** the last ~256 KB of the
    transcript contains `/check:pause`; else exit;
 2. replays the queue ops in that tail (enqueue appends, dequeue pops the
-   front, remove drops by content); if a pending entry is a pause command
-   newer than the last one handled (timestamp kept in the session's state
-   file), it sets the flag and applies `now`/`all` options, then denies;
-3. when the turn ends, the queued command runs as normal; UserPromptSubmit
-   sees the flag is already set and does nothing more (the command's
-   prompt just has the agent confirm in one line).
+   front, remove drops by content); every pending pause command newer than
+   the last one handled (timestamp kept in the session's state file) is
+   applied, oldest first, with its `now`/`all`/session options (the user
+   may type several, or retype one, before the next tool call), then it
+   denies;
+3. the queued command still runs as a prompt of its own: when the turn
+   ends (`dequeue`), or, for plain text absorbed into the turn, at once
+   (in 2.1.301 its UserPromptSubmit fires about 7 ms before the `remove`
+   record is written). UserPromptSubmit recognizes the command the gate
+   already applied and doesn't apply it a second time (so `pause all`
+   doesn't re-pause sessions resumed meanwhile); the command's prompt just
+   has the agent confirm in one line. The gate remembers the command
+   before applying it (with `now`, Claude Code can run an absorbed echo as
+   soon as the killed call ends, while other commands are still being
+   stopped), and remembers each queued command on its own, so two in one
+   turn are both recognized, even when typed before the same tool call. Each memory ends with its echo, or with
+   another prompt once its entry is no longer queued, so a lost echo
+   (interrupt, restart) can't swallow the same command typed later.
 
 The queue entries are an undocumented transcript format, so the tests pin
 it with a fixture and the fallback keyword stays.
@@ -193,8 +258,8 @@ unpause itself.
 `${XDG_STATE_HOME:-~/.local/state}/checkpoint/`:
 
 ```
-paused-all                 global flag (exists = paused)
-sessions/<session_id>.json  {cwd, claude_pid, task, paused, paused_at, checkpoint}
+flags/<session_id>         exists = paused (one per session, also for `pause all`)
+sessions/<session_id>.json  {cwd, claude_pid, task, paused, paused_ts, checkpoint}
 jobs.json, jobs/<id>/      job registry and logs
 ```
 
@@ -204,7 +269,7 @@ can find it.
 
 ### Pause flow
 
-1. The flag is set (session file `paused: true`, or `paused-all`).
+1. The flag is set (`flags/<sid>`; `pause all` sets one per running session).
 2. **PreToolUse (matcher `*`)** on every tool call. This runs constantly, so a
    **shell pre-filter** checks only for a flag file or a queued pause
    command in the transcript tail, and exits immediately if neither (no
@@ -277,8 +342,9 @@ call, and pauses as above.
     elapsed.
   - instruction: verify the "Check first" items, then continue from **Next
     action**.
-- `/resume all` clears `paused-all`. A plugin can't send prompts into other
-  sessions, so each paused session still needs a message (any message works).
+- `/resume all` un-pauses every session. A plugin can't send prompts into
+  other sessions, so each still needs a message (any message works), which
+  then brings its resume notes.
 - `/resume <task>` in a new session: same injection, from the tracker and
   checkpoint only. The tracker is written to make this nearly as good as
   resuming in place.
@@ -437,9 +503,10 @@ submits text. Not needed now that a typed slash command works mid-turn.
 
 - Requirements: **Claude Code and pixi only**, self-contained like
   gateway: pixi.toml pins Python 3.12, every hook and the MCP server run
-  through `pixi run --manifest-path ${CLAUDE_PLUGIN_ROOT}/pixi.toml --frozen`,
-  and the only thing outside pixi is the POSIX `sh` pre-filter. No system
-  Python, jq or other tools. Python stdlib only; macOS and Linux (desktop and
+  through `pixi run --manifest-path ${CLAUDE_PLUGIN_ROOT}/pixi.toml --frozen`
+  (started by `hooks/pixi.sh`, which finds pixi with a minimal PATH), and the
+  only things outside pixi are the POSIX `sh` scripts in `hooks/`. No system
+  Python, jq or other tools. Nothing in settings.json. Python stdlib only; macOS and Linux (desktop and
   headless).
 - PreToolUse runs on every tool call: keep the not-paused path to a file
   existence check in shell.
@@ -448,4 +515,54 @@ submits text. Not needed now that a typed slash command works mid-turn.
 - Never delete or rewrite a user's tracker content; only the agent edits it,
   and hooks only read it (and write `checkpoint.json`).
 - Coexists with gateway (both have PreToolUse hooks; order doesn't
-  matter, any deny wins).
+  matter, any deny wins). Jobs pick up the gateway's environment when it
+  is installed, and the gateway and pixi-guard check `job_start` (the
+  gateway also masks the other job tools' output; section 2); neither
+  plugin needs the other.
+
+## 0.2.0 revisions
+
+From a review of 0.1.0 (2026-10-18). The user's decisions:
+
+- **Install through the marketplace only.** `install.py` (which merged allow
+  rules into the user's settings.json) and `settings.rules.json` are gone.
+  The PreToolUse pre-filter allows `job_status`, `job_tail` and `job_stop`
+  itself. `job_start` is never auto-allowed: a hook allow skips the
+  permission prompt and the auto-mode classifier, and `job_start` runs any
+  command outside the Bash tool, past Bash deny rules and other plugins'
+  Bash checks.
+- **No settings file.** `config/settings.json` lived in the plugin folder,
+  which an update replaces; its values are constants in `state.py`.
+- **`pause all` is a flag per running session**, not a global flag: the
+  global one never cleared itself, kept every hook in every session on the
+  slow path, and paused sessions started later.
+- **Trackers naming another session are never used** (0.1 fell back to any
+  tracker with a stage in progress, so one session could overwrite
+  another's checkpoint and be told to continue its work).
+- **`pause now` parses the command** out of the shell's exact argv instead
+  of matching quoted text: Claude Code quotes `'` as `'"'"'`, and macOS `ps`
+  shows a newline as `\012`, so most real commands were never found.
+- Also: `job_stop` waits for the whole process group and reports
+  `stop_failed`; watchers end with cancelled calls; pixi is found outside
+  PATH; old records and job logs are pruned; the MCP server follows `/clear`;
+  paused time is an epoch; skills replace commands/; hooks use exec form.
+- **A queued pause command is applied as typed** by the gate or the
+  watcher, every queued one oldest first (not only the newest), also in a
+  session that is already paused: a queued
+  `pause all now` or `pause <session> now` stops the
+  other sessions' commands, and doesn't pause or kill the typing session
+  unless it is a target. Its echo (the same command run as a prompt) is
+  recognized until it comes or another prompt does, even when it comes
+  while the command is still being applied or after a second queued pause
+  command; a restarted session forgets them.
+- **Only a session that wrote it** takes a tracker that names no session.
+- **No `ps` dependency on Linux** (the table is read from `/proc`); on
+  macOS `/bin/ps` comes first, and a `ps` that fails or prints no rows
+  (a broken one earlier on PATH) passes to the next. A process table that
+  can't be read never marks jobs vanished or prunes records, and `pause
+  now` then says it couldn't stop the command (not "No command was
+  running"), also in the queued command's echo when the turn ends; `zombie()` skips a `ps` output that isn't a process state. `pause now` leaves an older shell running the same text (a
+  background call) alone. It kills with the table it found the command in,
+  and a read that fails while it waits asks each pid (taking it for "all
+  gone" left a command that ignores SIGTERM running, reported killed); a
+  command nothing of which dies even of SIGKILL is one it couldn't stop.

@@ -1,0 +1,201 @@
+#!/bin/sh
+# checkpoint's runtime launcher (POSIX sh; runs before Python exists).
+#
+#   env.sh ensure            build the env unless ready (the async SessionStart
+#                            hook, and the background build fast.sh starts)
+#   env.sh mcp               the MCP server: the env's python on run.py server
+#                            (starts a build and waits up to 25 s for it first)
+#   env.sh cli ARGS...       run.py ARGS... (the terminal helper; waits for a build)
+#   env.sh run ARGS...       run.py ARGS... now, or exit 75 when no runtime is ready (the mod)
+#   env.sh doctor [SESSION]  the runtime half of /check:doctor, without Python
+#   env.sh state             ready | older | building | failed | nopixi | missing
+#   env.sh flag pause SESSION [WHO]   pause flag, written whole (the mod)
+#   env.sh flag now SESSION           `pause now` request for the session's watcher
+#   env.sh flag noresume SESSION      the next prompt doesn't resume (the mod: isMeta,
+#                                     scheduled, automation); flag clear-noresume undoes it
+#   env.sh spool SESSION EVENT        stdin (one JSON object) as a record of the session's
+#                                     spool (the mod's events; hooks/lib.sh ck_spool)
+#
+# Paths and the env layout: hooks/lib.sh. Everything written under
+# CHECKPOINT_HOME is private (umask 077: folders 0700, files 0600).
+case $0 in
+*/*) root=${0%/*}/.. ;;
+*) root=.. ;;
+esac
+st=${CHECKPOINT_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/checkpoint}
+CHECKPOINT_USER_UMASK=${CHECKPOINT_USER_UMASK:-$(umask)}
+export CHECKPOINT_USER_UMASK
+umask 077
+. "$root/hooks/lib.sh"
+mode=${1:-}
+[ $# -gt 0 ] && shift
+
+case $mode in
+ensure)
+    ck_ensure 0 && exit 0
+    ck_lock_alive && exit 0 # another process builds
+    exit 1
+    ;;
+
+mcp | cli)
+    if [ "$mode" = cli ] && [ "${1:-}" = doctor ]; then
+        shift
+        exec sh "$root/hooks/env.sh" doctor "$@"
+    fi
+    if ! ck_python; then
+        ck_kick retry
+        i=0
+        if [ "$mode" = mcp ]; then n=25; else n=180; fi
+        [ "$mode" = cli ] && echo "checkpoint: setting up its runtime (first run; about a minute)..." >&2
+        s=
+        while [ "$i" -lt "$n" ] && ! ck_python; do
+            # No pixi: nothing to wait for. A failed build: give the retry
+            # just started a moment to take the lock.
+            s=$(ck_state)
+            case $s in
+            nopixi) break ;;
+            failed) [ "$i" -ge 3 ] && break ;;
+            esac
+            sleep 1
+            i=$((i + 1))
+        done
+        if ! ck_python; then
+            # No pixi stays the reason: the build kicked above may hold its
+            # lock by now ("building"), and it can only fail.
+            [ "$s" = nopixi ] || s=$(ck_state)
+            case $s in
+            nopixi) echo "checkpoint: pixi isn't installed, so checkpoint can't set itself up; install it from https://pixi.sh and start a new session" >&2 ;;
+            failed) echo "checkpoint: setting up its runtime failed (log: $ENVD/install.log); it is retried at the next session start" >&2 ;;
+            *) echo "checkpoint: still setting up its runtime (first run); the job tools come back once it is done: reconnect jobs in /mcp, or start a new session" >&2 ;;
+            esac
+            exit 1
+        fi
+    fi
+    if [ "$mode" = mcp ]; then ck_exec_py server; fi
+    ck_exec_py "$@"
+    ;;
+
+run)
+    ck_python || exit 75
+    ck_exec_py "$@"
+    ;;
+
+state)
+    ck_state
+    ;;
+
+doctor)
+    sid=
+    [ -n "${1:-}" ] && sid=$(ck_safe "$1")
+    ck_env
+    ver=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" 2>/dev/null | head -n 1)
+    echo "plugin: check ${ver:-?} at $(cd "$root" 2>/dev/null && pwd -P)"
+    if p=$(ck_find_pixi); then
+        pv=$("$p" --version 2>/dev/null | sed -n 's/^pixi[[:space:]]*\([0-9][0-9.]*\).*/\1/p' | head -n 1)
+        verdict=$(awk -v v="${pv:-0}" -v lo="$CK_PIXI_MIN" -v hi="$CK_PIXI_TESTED" '
+            function n(s,  a) { split(s, a, "."); return a[1] * 1000000 + a[2] * 1000 + a[3] }
+            BEGIN { if (v == "0") print "version unknown";
+                  else if (n(v) < n(lo)) print "too old: needs " lo " or newer (pixi self-update)";
+                  else if (n(v) > n(hi)) print "newer than tested (" lo " to " hi "); expected to work";
+                  else print "in the tested range " lo " to " hi }')
+        echo "pixi: $p (${pv:-?}; $verdict)"
+    else
+        echo "pixi: not found (install it from https://pixi.sh; tested $CK_PIXI_MIN to $CK_PIXI_TESTED)"
+    fi
+    case $(ck_state) in
+    ready) rs="ready" ;;
+    older) rs="building a new env for this version; the previous one runs meanwhile ($(ck_older))" ;;
+    building) rs="building (first run; log: $ENVD/install.log)" ;;
+    failed) rs="setup failed: $(ck_fail_line) (log: $ENVD/install.log; retried at the next session start)" ;;
+    nopixi) rs="missing, and pixi isn't installed" ;;
+    *) rs="not built yet" ;;
+    esac
+    echo "runtime: $rs"
+    echo "env: $ENVD"
+    if [ -n "${CHECKPOINT_PYTHON:-}" ]; then
+        echo "python: $CHECKPOINT_PYTHON (CHECKPOINT_PYTHON)"
+    elif ck_python; then
+        echo "python: $CKPY ($("$CKPY" -I -S -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || echo '?'))"
+    fi
+    # degraded/<session> is history (it stays until the session is pruned):
+    # whether the gate is degraded now is whether a runtime answers now.
+    mark=
+    if [ -n "$sid" ] && [ -f "$st/degraded/$sid" ]; then
+        mark=$({ LC_ALL=C tr -c '[:print:]' ' ' < "$st/degraded/$sid"; } 2>/dev/null | sed 's/ *$//' | cut -c 1-200)
+    fi
+    if ck_python; then
+        if [ -n "$mark" ]; then
+            echo "gate: normal (the runtime is ready); this session's gate last ran degraded at $mark"
+        else
+            echo "gate: normal"
+        fi
+    else
+        echo "gate: degraded (the runtime isn't ready: $(ck_state)): a paused session's tool calls are held, others go ahead; queued pause commands pause at the next tool call${mark:+; last recorded for this session: $mark}"
+    fi
+    if [ -d "$st" ]; then
+        m=$(ls -ld "$st" 2>/dev/null | cut -c 1-10)
+        case $m in
+        drwx------) echo "state: $st (private)" ;;
+        *) echo "state: $st ($m; the next session start makes it private)" ;;
+        esac
+    else
+        echo "state: $st (not created yet)"
+    fi
+    if [ -n "$sid" ] && [ -f "$st/flags/$sid" ]; then echo "pause: this session is paused"; fi
+    # The journal's shell half: what waits in the spool, and failures.
+    if [ -n "$sid" ]; then
+        n=0
+        [ -f "$st/spool/$sid/index" ] && n=$(ls "$st/spool/$sid" 2>/dev/null | grep -c '\.ev$')
+        echo "spool: $n record(s) of this session waiting to be ingested ($st/spool/$sid)"
+        if [ -f "$st/spool-errors/$sid" ]; then
+            echo "spool: RECORDING FAILED since $({ LC_ALL=C tr -c '[:print:]' ' ' < "$st/spool-errors/$sid"; } 2>/dev/null | sed 's/ *$//' | cut -c 1-200)"
+        elif [ -f "$st/spool-errors/$sid.last" ]; then
+            # History: the window's events are lost (the journal's recording.gap says so too).
+            echo "spool: last recording failure (recovered; its events are lost): $({ LC_ALL=C tr -c '[:print:]' ' ' < "$st/spool-errors/$sid.last"; } 2>/dev/null | sed 's/ *$//' | cut -c 1-300)"
+        fi
+        if [ -f "$st/journal-errors/$sid" ]; then
+            echo "journal: WRITING FAILED: $(sed -n 's/.*"text": *"\([^"]*\)".*/\1/p' "$st/journal-errors/$sid" | head -n 1 | cut -c 1-200)"
+        fi
+    fi
+    # The gateway's discovery file (CONTRACT-v1), checked as Python's
+    # gateway.discover checks it (tests compare the verdicts): set but empty
+    # turns the integration off.
+    if [ "${CHECKPOINT_GATEWAY_CONTRACT+set}" = set ]; then
+        gw=$CHECKPOINT_GATEWAY_CONTRACT
+    else
+        gw="$(ck_user_home)/.config/gateway/run/contract.json"
+    fi
+    echo "gateway contract: $(ck_contract "$gw")"
+    ;;
+
+flag)
+    what=${1:-}
+    sid=$(ck_safe "${2:-}")
+    [ -n "$sid" ] || exit 2
+    case $what in
+    pause)
+        [ -e "$st/flags/$sid" ] || ck_write "$st/flags/$sid" "$(ck_now) ${3:-mod}" || exit 1
+        ;;
+    now) ck_write "$st/now/$sid" "$(ck_now)" || exit 1 ;;
+    noresume) ck_write "$st/noresume/$sid" "$(ck_now)" || exit 1 ;;
+    clear-noresume) rm -f "$st/noresume/$sid" ;;
+    *) exit 2 ;;
+    esac
+    ;;
+
+spool)
+    LC_ALL=C
+    export LC_ALL
+    sid=$(ck_safe "${1:-}")
+    case ${2:-} in '' | *[!A-Za-z0-9._-]*) exit 2 ;; esac
+    input=$(cat)
+    [ -n "$sid" ] && [ -n "$input" ] || exit 2
+    ck_spool "$sid" "$2" || { [ -n "$CK_SPOOL_SAY" ] && echo "$CK_SPOOL_SAY" >&2; exit 1; }
+    ;;
+
+*)
+    echo "usage: env.sh ensure | mcp | cli ARGS | doctor [SESSION] | state | flag ... | spool SESSION EVENT" >&2
+    exit 2
+    ;;
+esac
+exit 0

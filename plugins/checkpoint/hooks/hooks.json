@@ -1,12 +1,30 @@
 {
+  "description": "checkpoint: every event goes to hooks/fast.sh (the shell pre-filter: it spools the event for the journal without Python, and starts Python only when needed, fail-safe without it); env.sh ensure builds the runtime in the background at session start; the mod (mod/register.tsx) adds the immediate /check-pause, /check-save, /check-list, /check-doctor, the status line, the journal's turn and compaction events and a fail-closed tool gate.",
+  "modules": [
+    "./mod/register.tsx"
+  ],
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh\" SessionStart \"${CLAUDE_PLUGIN_ROOT}\"",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh",
+              "SessionStart"
+            ],
             "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/env.sh",
+              "ensure"
+            ],
+            "async": true,
+            "timeout": 900
           }
         ]
       }
@@ -16,7 +34,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh\" UserPromptSubmit \"${CLAUDE_PLUGIN_ROOT}\"",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh",
+              "UserPromptSubmit"
+            ],
             "timeout": 60
           }
         ]
@@ -24,38 +46,50 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh\" PreToolUse \"${CLAUDE_PLUGIN_ROOT}\"",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh",
+              "PreToolUse"
+            ],
             "timeout": 30
           }
-        ],
-        "matcher": "*"
+        ]
       }
     ],
     "PostToolUse": [
       {
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh\" PostToolUse \"${CLAUDE_PLUGIN_ROOT}\"",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh",
+              "PostToolUse"
+            ],
             "timeout": 30
           }
-        ],
-        "matcher": "*"
+        ]
       }
     ],
     "PostToolUseFailure": [
       {
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh\" PostToolUseFailure \"${CLAUDE_PLUGIN_ROOT}\"",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh",
+              "PostToolUseFailure"
+            ],
             "timeout": 30
           }
-        ],
-        "matcher": "*"
+        ]
       }
     ],
     "Stop": [
@@ -63,8 +97,162 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh\" Stop \"${CLAUDE_PLUGIN_ROOT}\"",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh",
+              "Stop"
+            ],
             "timeout": 60
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh",
+              "SessionEnd"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh",
+              "PreCompact"
+            ],
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh",
+              "PostCompact"
+            ],
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh",
+              "SubagentStart"
+            ],
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh",
+              "SubagentStop"
+            ],
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh",
+              "Notification"
+            ],
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh",
+              "PermissionDenied"
+            ],
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh",
+              "PermissionRequest"
+            ],
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh",
+              "TaskCreated"
+            ],
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/fast.sh",
+              "TaskCompleted"
+            ],
+            "timeout": 30
           }
         ]
       }

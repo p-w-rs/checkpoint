@@ -17,11 +17,18 @@ from typing import Any
 
 TAIL_BYTES = 262144  # keep in sync with hooks/fast.sh
 
-COMMAND_RE = re.compile(r"^/check:(pause|resume|status|help)(?:\s+(.*))?$", re.S)
-KEYWORD_RE = re.compile(r"^pause(?:\s+(now|all|all\s+now|now\s+all))?[.!]?$", re.I)
+COMMAND_RE = re.compile(r"^/check:(pause|resume|status|help|doctor|save|list|diff|cancel|stop|complete|export)"
+                        r"(?:\s+(.*))?$", re.S)
+# `pause interrupt` is `pause now` (the in-flight command is stopped at once).
+KEYWORD_RE = re.compile(r"^pause(?:\s+(now|interrupt|all|all\s+now|now\s+all|all\s+interrupt|interrupt\s+all))?[.!]?$",
+                        re.I)
 
 
 def tail_lines(path: str | Path, nbytes: int = TAIL_BYTES) -> list[str]:
+    """The last `nbytes` of the transcript as lines, the cut first line
+    dropped. Split on "\n" only, exactly like the shell pre-filter's
+    `tail -c | sed 1d` (str.splitlines would also split on U+2028 and
+    friends, and the two would disagree on what a line is)."""
     try:
         with open(path, "rb") as f:
             f.seek(0, 2)
@@ -30,10 +37,12 @@ def tail_lines(path: str | Path, nbytes: int = TAIL_BYTES) -> list[str]:
             data = f.read()
     except OSError:
         return []
-    lines = data.decode("utf8", "replace").splitlines()
-    if size > nbytes and lines:
-        lines = lines[1:]  # first line is cut
-    return lines
+    raw = data.split(b"\n")
+    if raw and raw[-1] == b"":
+        raw.pop()
+    if size > nbytes and raw:
+        raw = raw[1:]  # first line is cut
+    return [line.decode("utf8", "replace") for line in raw]
 
 
 def parse_command(text: str) -> tuple[str, list[str]] | None:
@@ -42,10 +51,13 @@ def parse_command(text: str) -> tuple[str, list[str]] | None:
     text = (text or "").strip()
     m = COMMAND_RE.match(text)
     if m:
-        return m.group(1), (m.group(2) or "").split()
+        args = (m.group(2) or "").split()
+        if m.group(1) == "pause":   # `interrupt` is `now`
+            args = ["now" if a.lower() == "interrupt" else a for a in args]
+        return m.group(1), args
     m = KEYWORD_RE.match(text)
     if m:
-        return "pause", (m.group(1) or "").lower().split()
+        return "pause", ["now" if a == "interrupt" else a for a in (m.group(1) or "").lower().split()]
     return None
 
 
@@ -63,10 +75,13 @@ def queue_ops(lines: list[str]) -> list[dict[str, Any]]:
     return ops
 
 
-def pending_queue(lines: list[str]) -> list[dict[str, Any]]:
+def replay_queue(lines: list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Replay the queue: enqueue appends, dequeue pops the front, remove drops
-    by content. What's left is waiting for the turn to end."""
+    by content. Returns (still pending, removed) ops. Pending ones wait for
+    the turn to end; removed ones were absorbed mid-turn as plain text and
+    never run as a prompt of their own."""
     pending: list[dict[str, Any]] = []
+    removed: list[dict[str, Any]] = []
     for op in queue_ops(lines):
         kind = op.get("operation")
         content = (op.get("content") or "").strip()
@@ -75,18 +90,85 @@ def pending_queue(lines: list[str]) -> list[dict[str, Any]]:
         elif kind == "dequeue" and pending:
             pending.pop(0)
         elif kind == "remove":
+            removed.extend(q for q in pending if (q.get("content") or "").strip() == content)
             pending = [q for q in pending if (q.get("content") or "").strip() != content]
-    return pending
+    return pending, removed
 
 
-def queued_pause(lines: list[str]) -> tuple[dict[str, Any], list[str]] | None:
-    """The newest pending pause command or keyword, with its args."""
-    hit = None
+def queue_lines(path: str | Path) -> list[str]:
+    """Every queue-operation line of the whole transcript (not just the
+    tail): for the rare check of what became of one queued command after a
+    long turn. Reads the file once, keeping only those lines."""
+    out = []
+    try:
+        with open(path, "rb") as f:
+            for raw in f:
+                if b'"queue-operation"' in raw:
+                    out.append(raw.rstrip(b"\n").decode("utf8", "replace"))
+    except OSError:
+        return []
+    return out
+
+
+def queue_fates(lines: list[str], stamps: list[str]) -> dict[str, str]:
+    """What became of the commands enqueued at these timestamps: 'pending'
+    (still queued), 'dequeued' (run as a prompt when a turn ended),
+    'removed' (absorbed into a turn as plain text). One not in these lines
+    is left out."""
+    want = {ts for ts in stamps if ts}
+    fates: dict[str, str] = {}
+    pending: list[dict[str, Any]] = []
+    for op in queue_ops(lines):
+        kind = op.get("operation")
+        content = (op.get("content") or "").strip()
+        if kind == "enqueue":
+            pending.append(op)
+            if op.get("timestamp") in want:
+                fates[op["timestamp"]] = "pending"
+        elif kind == "dequeue" and pending:
+            ts = pending.pop(0).get("timestamp")
+            if ts in want:
+                fates[ts] = "dequeued"
+        elif kind == "remove":
+            for q in pending:
+                if q.get("timestamp") in want and (q.get("content") or "").strip() == content:
+                    fates[q["timestamp"]] = "removed"
+            pending = [q for q in pending if (q.get("content") or "").strip() != content]
+    return fates
+
+
+def bash_commands(lines: list[str]) -> set[str]:
+    """Commands of the Bash tool calls in these transcript lines (foreground
+    and background)."""
+    out: set[str] = set()
+    for line in lines:
+        if '"tool_use"' not in line or '"Bash"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        for part in (rec.get("message") or {}).get("content") or []:
+            if isinstance(part, dict) and part.get("type") == "tool_use" and part.get("name") == "Bash":
+                cmd = (part.get("input") or {}).get("command")
+                if isinstance(cmd, str) and cmd.strip():
+                    out.add(cmd.strip())
+    return out
+
+
+def pending_queue(lines: list[str]) -> list[dict[str, Any]]:
+    return replay_queue(lines)[0]
+
+
+def queued_pauses(lines: list[str]) -> list[tuple[dict[str, Any], list[str]]]:
+    """Every pending pause command or keyword, with its args, oldest first
+    (several can be typed before the next tool call)."""
+    out = []
     for op in pending_queue(lines):
         cmd = parse_command(op.get("content") or "")
         if cmd and cmd[0] == "pause":
-            hit = (op, cmd[1])
-    return hit
+            out.append((op, cmd[1]))
+    return out
 
 
 def last_pause_line(lines: list[str]) -> str:
@@ -97,6 +179,16 @@ def last_pause_line(lines: list[str]) -> str:
         if '"queue-operation"' in line and re.search(r'check:pause|"content":"\s*[Pp]ause', line):
             last = line
     return last
+
+
+def tool_results(lines: list[str]) -> set[str]:
+    """tool_use ids that already have a tool_result (finished, failed,
+    cancelled or denied)."""
+    out: set[str] = set()
+    for line in lines:
+        if '"tool_result"' in line:
+            out.update(re.findall(r'"tool_use_id":\s*"([^"]+)"', line))
+    return out
 
 
 def recent_tool_calls(lines: list[str], n: int = 10) -> list[dict[str, Any]]:

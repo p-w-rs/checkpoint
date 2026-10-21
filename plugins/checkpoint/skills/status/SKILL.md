@@ -1,4 +1,5 @@
 ---
+name: status
 description: Show which sessions are paused or working, their tasks, and detached jobs
 disable-model-invocation: true
 ---

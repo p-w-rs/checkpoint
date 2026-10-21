@@ -1,11 +1,19 @@
 # Self-contained runtime for the checkpoint plugin.
 # Recipients need only Claude Code + pixi; pixi provides the Python below, so
 # no system install is required. All plugin code is pure standard library;
-# the only thing outside pixi is the POSIX sh pre-filter in hooks/fast.sh.
+# the only things outside pixi are the POSIX sh scripts in hooks/ and the mod
+# (hooks/mod/, run by Claude Code itself).
+# An installed copy never builds here: hooks/env.sh copies this file and
+# pixi.lock into Claude Code's plugin data folder and runs
+# `pixi install --locked --manifest-path <that copy>` (hooks/lib.sh).
 [workspace]
 name = "checkpoint"
 channels = ["conda-forge"]
 platforms = ["osx-arm64", "osx-64", "linux-64", "linux-aarch64"]
+# The oldest pixi that reads pixi.lock (format 7): 0.67.2 refuses it. Tested
+# with `pixi install --locked`: 0.68.0, 0.68.1, 0.72.0, 0.76.0, 0.79.0, 0.81.0,
+# 0.82.0 (docs/ARCHITECTURE.md, "Runtime"). No upper bound.
+requires-pixi = ">=0.68.0"
 
 [dependencies]
 python = "3.12.*"
@@ -13,7 +21,15 @@ python = "3.12.*"
 [tasks]
 server = "python run.py server"
 test = "python tests/run_tests.py"
+release-check = "python tests/release_check.py"   # before committing, after `git add -A`
 status = "python run.py status"
+doctor = "python run.py doctor"
 pause = "python run.py pause"           # pixi run pause all | pixi run pause <session>
-resume = "python run.py resume"         # pixi run resume all
-install = "python install.py"           # register the plugin + permission rules for this user
+resume = "python run.py resume"         # pixi run resume all | pixi run resume <session>
+summary = "python run.py summary"       # pixi run summary [<task>|<session>|last]: a task's recovery summary
+tasks = "python run.py tasks"           # recent tasks in the journal
+list = "python run.py list"             # pixi run list <task>|<session>: its checkpoints (time, seq, line, staleness)
+diff = "python run.py diff"             # pixi run diff <task> [<cp> [<cp>|now]]
+reconcile = "python run.py reconcile"   # pixi run reconcile <task>|last [<cp>]: what a resume would check first
+export = "python run.py export"         # pixi run export <task>|last [<path>]: a sanitized bundle (0600)
+prune = "python run.py prune"           # pixi run prune [--dry-run]: journals past retention

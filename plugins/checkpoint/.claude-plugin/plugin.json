@@ -1,9 +1,24 @@
 {
   "name": "check",
-  "version": "0.1.0",
-  "description": "Pause agents at their next tool call (each finishes its step and updates its tracker), resume them in the same or a new session, and run long work as detached jobs that survive.",
+  "version": "0.7.2",
+  "description": "Automatic, durable task tracking (a journal of prompts, tool calls, plan steps, file hashes, test runs and sessions), recovery that reconciles before it resumes (changed files kept, stale tests, interrupted operations classified, unknown external effects checked, never repeated blindly), checkpoints to list, diff, resume from and export, pausing at once or at the next tool call, cancel and stop, and detached jobs that survive (run and supervised by the gateway plugin when it is installed, with per-job pause policies).",
   "author": {
     "name": "p-w-rs"
   },
-  "keywords": ["pause", "resume", "tracker", "jobs", "hooks", "mcp"]
+  "homepage": "https://github.com/p-w-rs/checkpoint",
+  "repository": "https://github.com/p-w-rs/checkpoint",
+  "keywords": [
+    "pause",
+    "resume",
+    "journal",
+    "checkpoint",
+    "recovery",
+    "tracker",
+    "jobs",
+    "hooks",
+    "mcp",
+    "reconcile",
+    "cancel",
+    "gateway"
+  ]
 }

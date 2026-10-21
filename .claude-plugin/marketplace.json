@@ -4,13 +4,13 @@
     "name": "p-w-rs"
   },
   "metadata": {
-    "description": "Local marketplace for the checkpoint plugin."
+    "description": "Marketplace for the checkpoint plugin (github.com/p-w-rs/checkpoint)."
   },
   "plugins": [
     {
       "name": "check",
       "source": "./plugins/checkpoint",
-      "description": "Pause running Claude Code agents at a clean point and resume them later, with progress trackers and detached jobs."
+      "description": "Automatic durable task tracking with recovery after crashes and kills, checkpoints, pausing Claude Code agents at a clean point (or at once) and resuming them later, with progress trackers and detached jobs."
     }
   ]
 }
