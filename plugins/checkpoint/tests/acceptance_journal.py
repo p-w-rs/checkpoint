@@ -70,6 +70,12 @@ def wait(s: Session, cond, timeout: float, step: float = 0.2) -> bool:
     return cond()
 
 
+def wait_main(s: Session, n: int, timeout: float) -> bool:
+    """At least n main-loop requests, pumping the pty meanwhile (never FakeAPI.wait_main, which only
+    sleeps: Claude Code then blocks writing to its terminal; acceptance_recovery.wait_main)."""
+    return bool(wait(s, lambda: len(s.api.main_requests()) >= n, timeout, 0.05))
+
+
 def running(marker: str) -> bool:
     out = subprocess.run(["ps", "-A", "-ww", "-o", "command="], capture_output=True, text=True).stdout
     return any(marker in ln and "ps -A" not in ln for ln in out.splitlines())
@@ -186,7 +192,7 @@ def main() -> int:
         try:
             s2.wait_ready(timeout=90)
             s2.submit("/check:resume last")
-            got = s2.api.wait_main(1, timeout=60)
+            got = wait_main(s2, 1, 60)
             reqs = s2.api.main_requests()
             first = request_text(reqs[0]) if reqs else ""
             check("its session start offers the killed task as interrupted (SessionStart context)",
@@ -221,7 +227,7 @@ def main() -> int:
         try:
             s3.wait_ready(timeout=90)
             s3.submit("go on")
-            s3.api.wait_main(1, timeout=60)
+            wait_main(s3, 1, 60)
             reqs = s3.api.main_requests()
             txt = request_text(reqs[0]) if reqs else ""
             check("resuming the killed session brings its recovery summary in at the start (<checkpoint-recovery>)",

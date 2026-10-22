@@ -80,6 +80,15 @@ def wait(s: Session, cond, timeout: float, step: float = 0.1) -> bool:
     return bool(cond())
 
 
+def wait_main(s: Session, n: int, timeout: float) -> bool:
+    """At least n main-loop requests, reading the terminal meanwhile. Every wait after a submit must
+    pump the pty (wait() does): Claude Code writes to its terminal synchronously, so a test that only
+    sleeps (FakeAPI.wait_main) lets the pty fill up, Claude Code's main thread blocks in write(), and
+    the session "stalls" for exactly as long as the test waits (the first prompt after --resume
+    "stalled" 60 s in 0.7.3's verification: 60 s was this wait, not Claude Code)."""
+    return wait(s, lambda: len(s.api.main_requests()) >= n, timeout, 0.05)
+
+
 def ps_lines() -> list[str]:
     out = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,command="], capture_output=True, text=True).stdout
     return [ln for ln in out.splitlines() if "ps -A" not in ln]
@@ -149,7 +158,7 @@ def type_cmd(s: Session, text: str) -> float:
 
 
 def last_request(s: Session, n0: int, timeout: float = 60) -> str:
-    s.api.wait_main(n0 + 1, timeout=timeout)
+    wait_main(s, n0 + 1, timeout)
     reqs = s.api.main_requests()
     return request_text(reqs[-1]) if len(reqs) > n0 else ""
 
@@ -308,7 +317,9 @@ def part_a(E: Env) -> None:
         s2.api.script(["Resuming from the reconciliation."])
         n0 = len(s2.api.main_requests())
         s2.submit("ok, resume")
+        t0 = time.time()
         rq = last_request(s2, n0)
+        SUMMARY["a_resume_s"] = round(time.time() - t0, 2)   # Enter to the request (a test not reading: 60 s)
         check("a typed message resumes after the restart: reconciled, the killed command listed as stopped by "
               "`pause now` (canceled, not unknown, never 'redo from the start')",
               "Reconciled before resuming" in rq and "stopped by `pause now`" in rq and "from the start" not in rq
@@ -389,7 +400,7 @@ def part_c(E: Env) -> None:
     try:
         s3.wait_ready(timeout=90)
         s3.submit("/check:resume last")
-        s3.api.wait_main(1, timeout=60)
+        wait_main(s3, 1, 60)
         rq = next((request_text(r) for r in reversed(s3.api.main_requests()) if "Reconciled before resuming" in request_text(r)), "")
         SUMMARY["c_resume_chars"] = len(rq)
         check("/check:resume last in a new session: the reconciliation reaches the model", bool(rq))
@@ -413,7 +424,7 @@ def part_c(E: Env) -> None:
     try:
         s4.wait_ready(timeout=90)
         s4.submit("go on")
-        s4.api.wait_main(1, timeout=60)
+        wait_main(s4, 1, 60)
         rq = request_text(s4.api.main_requests()[0]) if s4.api.main_requests() else ""
         check("claude --resume <the killed session>: its start brings the reconciliation and the summary",
               "<checkpoint-recovery>" in rq and "Reconciled before resuming" in rq and "outcome unknown" in rq)

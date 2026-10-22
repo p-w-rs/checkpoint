@@ -17,7 +17,7 @@ idempotent pause retries with pause ids): 0.7.0; the acceptance fixes:
 0.7.1; a gateway refusal never runs a job in the own runner: 0.7.2; the
 GitHub install test's fixes (a truthful first status, the gateway's contract
 file in the password database's home for the mod too, the state's normal
-forms in the footer): 0.7.3), with
+forms in the footer): 0.7.3, unshipped), with
 the gateway contract
 in [docs/CONTRACT-v1.md](docs/CONTRACT-v1.md) (identical to the gateway's
 copy; `gateway.py` is its client).
@@ -112,7 +112,36 @@ pixi exec --spec python=3.12 --spec pyte python tests/acceptance_independence.py
 pixi exec --spec python=3.12 --spec pyte python tests/acceptance_durability.py --tmp <dir> --pixi-cache <dir>   # 14.11 (~2 min)
 ```
 
-Last full run (2026-10-21, 0.7.3, the GitHub install test's fixes): the
+Last full run (2026-10-21, 0.7.3 unshipped, the stall guard reverted, the
+harness fixed): the suite 961 passed (macOS, sh = bash 3.2), under dash
+955; `claude plugin test .` 61 passed; `validate` passes for the plugin
+and the marketplace. The verification's guard (9d09797: no status change
+while a prompt is being submitted, `submitting`) is reverted: the 60 s
+stall of the first prompt after `claude --resume` in acceptance_recovery
+part a was the test. `last_request` waited through `FakeAPI.wait_main`,
+which sleeps without reading the PTY, and Claude Code writes to its
+terminal synchronously: its main thread blocked in write() on the
+harness's PTY (a `sample`: `__write_nocancel`) until the test read again,
+so the stall always lasted as long as the test's wait (75 s with a 75 s
+wait). An independent re-verification: with `last_request` reading the
+terminal, the code before the guard passed part a 3 of 3 with the status
+clear landing inside the hook; the guard with the old wait still stalled 6
+of 17 times. Nothing to report upstream. Every acceptance wait after a
+submit now reads the terminal (`wait_main` in acceptance_recovery and
+acceptance_journal; acceptance_gateway's already did, and independence and
+durability import it). TUI (macOS 2.1.301, installed copies, scratch
+config, fake API): recovery part a 4 of 4 runs 19/19 (the first prompt
+after the restart reached the fake API 0.39-0.49 s after Enter; the first
+run's script had no timer yet), then `acceptance_recovery` 40/40 (0.44 s there) and
+`acceptance_journal` 20/20. On the Debian 13 arm64 VM (Claude Code
+2.1.304), the tree at cc4b3d6 (before the revert: the guard and the old
+waits): the suite 967 passed / 0 failed under bash, 955 / 0 under dash;
+`acceptance_journal` 20/20, `acceptance_recovery` 40/40 (twice),
+`acceptance_authz` 18/18, `acceptance_independence` 49/49,
+`acceptance_gateway` 27/27. Not run this round: authz, independence,
+durability and gateway on macOS, the reverted tree on the VM, a TMPDIR of
+~180 characters.
+Before (2026-10-21, 0.7.3, the GitHub install test's fixes): the
 suite 961 passed (macOS, sh = bash 3.2), under dash 955 (two earlier dash
 runs failed only the fast-path overhead timing: sequential medians,
 PreToolUse 47.6 -> 60.1 ms, with the machine at load 8-10 from other users'
@@ -434,6 +463,11 @@ real contract file and `/check:status` calls the daemon it names. It names
 `CLAUDE_PLUGIN_DATA` as well (the sessions' data folder): lib.sh takes it
 before `CHECKPOINT_ENVD`, so a caller's own value sent `env.sh run status`
 to an env that isn't there (exit 75, nothing printed; a suite check pins it).
+An acceptance wait after a submit must pump the PTY (the script's `wait()`
+or `wait_main()`, never `FakeAPI.wait_main` or a bare sleep): Claude Code
+writes to its terminal synchronously, so a test that only sleeps blocks it
+in write() for exactly as long as the test waits (0.7.3's 60 s "stall" of
+the first prompt after `--resume` was this, not Claude Code).
 Add a check for every behavior
 change; mutation-check the important ones (undo the fix, see the check
 fail, restore). Mutate a scratch copy of the checkout, and run copies one

@@ -298,6 +298,19 @@ config: "installed copies"; macOS = Claude Code 2.1.301, VM = the Debian VM's 2.
    holds a pause and failures. Validated: suite 961 (sh), 955 (dash; two earlier dash runs failed
    only the fast-path timing under load); mod tests 61; 3 of 3 mutations; TUI first use (installed,
    and `--plugin-dir` with an empty pixi cache): setting up, then recording, no warning sign.
+   *Verification (2026-10-21, 0.7.3, unshipped)*: the verification's guard (9d09797: the mod drew
+   no status while a prompt was being submitted) is reverted. The 60 s stall of the first prompt
+   after `claude --resume` (acceptance_recovery part a) was the test, not Claude Code: its wait
+   slept without reading the PTY, Claude Code's synchronous terminal writes blocked until the test
+   read again, and the stall always equalled the test's wait (75 s with a 75 s wait); with the wait
+   reading the terminal the code before the guard passed 3 of 3, while the guard with the old wait
+   still stalled 6 of 17. Nothing to report upstream. Harness fix: every acceptance wait after a
+   submit pumps the PTY (acceptance_recovery and acceptance_journal; the gateway script's
+   `wait_main` already did). Validated: suite 961 (sh), 955 (dash); mod tests 61; TUI (macOS,
+   installed): recovery part a 4 of 4 runs 19/19 (first prompt after the restart 0.39-0.49 s),
+   recovery 40/40, journal 20/20; the Debian VM (2.1.304, the tree before the revert): suite 967
+   (bash), 955 (dash), journal 20/20, recovery 40/40 twice, authz 18/18, independence 49/49,
+   gateway 27/27.
 
 ## Rules for this work
 
