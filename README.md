@@ -28,7 +28,7 @@ pause, a crash, a compaction or a restart.
   stopping anything; list, diff, resume from or export them. Long work runs
   as detached jobs that survive pauses and the session.
 
-Plugin `check` (version 0.7.1) in the marketplace `checkpoint`
+Plugin `check` (version 0.7.3) in the marketplace `checkpoint`
 (`github.com/p-w-rs/checkpoint`). Sister plugin:
 [gateway](https://github.com/p-w-rs/gateway), built the same way; with it,
 jobs run in the gateway's managed shell and each host a task used is checked
@@ -41,15 +41,24 @@ before a resume.
 ## Status: built and tested
 
 "Tested live" means a real Claude Code session in a terminal, driven
-automatically against a stand-in model, with the plugin installed from a git
-marketplace into a throwaway configuration, on macOS arm64 (Claude Code
-2.1.301) and a Debian 13 arm64 VM (Claude Code 2.1.304), 2026-10-21. The
-repository's own test suite passes on macOS (938 checks) and on the Linux VM
-(944, under dash and under bash).
+automatically against a stand-in model (never the real one), with the plugin
+installed from a git marketplace into a throwaway configuration, on macOS
+arm64 (Claude Code 2.1.301) and a Debian 13 arm64 VM (Claude Code 2.1.304),
+2026-10-21. The live checks ran on 0.7.3, except on the Linux VM: the
+checks in the concurrency row (concurrent sessions, duplicate events, a hung
+runtime) last ran on 0.7.1, and the permission and either-plugin-alone
+checks ran on an earlier 0.7.3 build that still had a small mod change,
+since reverted. The repository's own test suite passes on macOS (961
+checks under sh, 955 under dash) and on the Linux VM (967 under bash, 955
+under dash). The install from this GitHub repository was tested too: a fresh
+install with a live session on both systems; on the Linux VM, the `/plugin
+marketplace add` and `/plugin install` forms and both kinds of uninstall; on
+macOS, from the command line, an update from 0.7.2, disable and enable, and
+both kinds of uninstall.
 
 | Area | Built | Tested |
 |---|---|---|
-| Install, first-use setup, update, uninstall | yes | live (macOS, Linux VM), from a local git server rather than GitHub |
+| Install, first-use setup, update, uninstall | yes | live (macOS, Linux VM) from a local git marketplace; from GitHub as described above |
 | The journal survives a kill without a handoff; recovery summary | yes | live (macOS, Linux VM) |
 | Immediate pause during a reply, a long command, queued work; no self-resume | yes | live (macOS, Linux VM) |
 | Resume after a crash, `--resume`, `/compact`, `/clear`; stale tests; a lost push not repeated | yes | live (macOS, Linux VM) |
@@ -57,7 +66,7 @@ repository's own test suite passes on macOS (938 checks) and on the Linux VM
 | Permission verdicts recorded and checked before a resume | yes | live (macOS, Linux VM) |
 | Jobs handed to the gateway, per-job pause policies | yes | live, both plugins installed (local jobs; remote hosts not from a session) |
 | Either plugin alone, disabled, an incompatible or upgraded gateway | yes | live (macOS, Linux VM) |
-| Concurrent sessions, duplicate events, a hung runtime, a full disk | yes | live (full disk on macOS only) |
+| Concurrent sessions, duplicate events, a hung runtime, a full disk | yes | live (full disk on macOS only; the Linux VM on 0.7.1) |
 | The desktop app | the same mod | untested |
 | Artifact references beyond changed files | no | |
 
@@ -67,8 +76,9 @@ Details per requirement: [docs/PLAN-v4.md](docs/PLAN-v4.md).
 
 - **Claude Code.** The hooks, skills and job tools work on any recent
   version (tested on 2.1.301 and 2.1.304). The immediate controls
-  (`/check-pause`, `/check-save`, ...), the status line, the Checkpoints pane
-  and telling your messages from automated ones need its mods: **2.1.287 or
+  (`/check-pause`, `/check-save`, ...), the footer label and the status line,
+  the Checkpoints pane and telling your messages from automated ones need its
+  mods: **2.1.287 or
   newer** in the terminal, **2.1.286 or newer** in the desktop app.
 - **pixi 0.68.0 or newer** ([pixi.sh](https://pixi.sh)); tested: 0.68.0,
   0.68.1, 0.72.0, 0.76.0, 0.79.0, 0.81.0 and 0.82.0. 0.67 and older can't
@@ -116,8 +126,9 @@ up its runtime (first run); pausing works`, `check: recording · updating its
 runtime in the background`), and only what needs you on Claude Code's status
 line under the prompt, which Claude Code draws with a warning sign for every
 plugin: `check: paused · type a message or /check:resume to resume`,
-`recording FAILED · /check-doctor`, `runtime setup FAILED`, `no runtime: pixi
-not found`, `state unknown`.
+`check: recording FAILED · /check-doctor`, `check: runtime setup FAILED ·
+/check-doctor; pausing works`, `check: no runtime: pixi not found ·
+/check-doctor; pausing works`, `check: state unknown (/check-doctor)`.
 
 Nothing is added to your settings (Claude Code records the install itself, as
 for any plugin).
@@ -165,11 +176,11 @@ the acceptance scripts: [CLAUDE.md](CLAUDE.md).
 
 | | |
 |---|---|
-| macOS, Apple silicon | tested (macOS 26): everything above |
+| macOS, Apple silicon | tested (macOS 26): everything above; from GitHub, the `/plugin` forms only on the Linux VM (see Status) |
 | Linux, ARM64 | tested in a Debian 13 VM: the test suite (under dash and bash) and live sessions |
 | macOS Intel, Linux x86-64 | in the lock (osx-64, linux-64), expected to work, untested (no such machine was available) |
 | Windows | native Windows isn't supported (the hooks need a POSIX `sh`, the lock has no win-64, the code uses POSIX-only modules). Use WSL 2: install Claude Code and pixi inside it, and the Linux rules apply (untested) |
-| Claude Code surfaces | the terminal: tested. The desktop app: built for (the same mod), untested. Without mods (VS Code, the mobile app, Remote Control, `claude -p`, or mods switched off) everything works but the immediate controls and the pane, and pausing waits for the next tool call |
+| Claude Code surfaces | the terminal: tested. The desktop app: built for (the same mod), untested. Without mods (VS Code, the mobile app, Remote Control, `claude -p`, or mods switched off) everything works but the immediate controls, the footer label and status line, and the pane, and pausing waits for the next tool call |
 
 ## What it installs
 
@@ -442,7 +453,7 @@ checkpoint runs itself keeps its raw output in its log file.
   reconciles first; interrupted operations are classified instead of "redo
   the stage from the start"; with the gateway installed, jobs run there.
 
-**From 0.3 through 0.7.0**: the state, journals (since 0.4), checkpoints and
+**From 0.3 through 0.7.2**: the state, journals (since 0.4), checkpoints and
 job records carry over as they are; jobs recorded before the gateway
 integration (0.6) stay in the own runner.
 
@@ -477,8 +488,8 @@ integration (0.6) stay in the own runner.
 
 Known limitations, each with the smallest remedy.
 
-- The desktop app wasn't tested (the immediate controls, the status line and
-  the Checkpoints pane run there through the same mod). Remedy: use the
+- The desktop app wasn't tested (the immediate controls, the footer label,
+  the status line and the Checkpoints pane run there through the same mod). Remedy: use the
   terminal for now, or try a pause and a resume there before relying on it.
 - Without mods (Claude Code older than 2.1.287 in the terminal or 2.1.286 in
   the desktop app, or mods switched off) there is no immediate pause: a pause
