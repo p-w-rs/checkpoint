@@ -298,15 +298,6 @@ config: "installed copies"; macOS = Claude Code 2.1.301, VM = the Debian VM's 2.
    holds a pause and failures. Validated: suite 961 (sh), 955 (dash; two earlier dash runs failed
    only the fast-path timing under load); mod tests 61; 3 of 3 mutations; TUI first use (installed,
    and `--plugin-dir` with an empty pixi cache): setting up, then recording, no warning sign.
-   *Verification fix (2026-10-21, 0.7.3, unshipped)*: after `claude --resume` of a paused session
-   the first typed message stalled for 60 s (acceptance_recovery part a, 4 of 4 runs): the 1 s look
-   cleared the status line while the classic UserPromptSubmit hook ran, and Claude Code read the
-   hook's result only at its 60 s timeout (Claude Code's stall; 0.7.2 never cleared the line that
-   early). The mod no longer changes the status line or the footer label while a prompt is being
-   submitted (`submitting` in register.tsx; what came meanwhile is drawn once the hook's `next()`
-   returned). Validated: suite 961 (sh), 955 (dash); mod tests 64 (3 new); 3 of 3 mutations; TUI
-   (macOS, installed): recovery part a 3 of 3 runs (19/19; the first prompt after the restart
-   settled in 0.44-0.47 s, was 60.6 s), recovery 40/40, journal 20/20, gateway 27/27.
 
 ## Rules for this work
 

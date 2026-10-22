@@ -3,11 +3,10 @@
 // dim label in the prompt footer (SessionMode), a pause or a failure the
 // status line (Claude Code draws every plugin status line with a warning
 // sign); the first draw is truthful before SessionStart recorded the env;
-// neither changes while a prompt is being submitted; the gateway's contract
-// file is found in the password database's home, as Python finds it, not
-// $HOME's.
+// the gateway's contract file is found in the password database's home, as
+// Python finds it, not $HOME's.
 import { expect, test } from 'claude-code/testing'
-import { COMPOSER, FLAG, footer, hold, HOME, PRESENT, ran, settle, SID, start, USER_HOME, world } from './world.ts'
+import { COMPOSER, FLAG, footer, HOME, PRESENT, ran, settle, SID, start, USER_HOME, world } from './world.ts'
 import { pluginDataDir, statusOf } from '../../hooks/mod/logic.ts'
 
 const ENVD = '/data/envs/abc123def456'
@@ -121,87 +120,6 @@ test('a pause moves the state to the status line, and a resume back to the foote
   await settle(w, () => w.statuses.length > 1)
   expect(w.statuses.at(-1)).toBe(undefined) // the line is cleared
   expect(await footer($, w)).toEqual(['focus', 'check: recording'])
-})
-
-// A prompt being submitted holds the status line and the footer label: the
-// status line cleared during the classic UserPromptSubmit hook of a resumed
-// session's first prompt held that prompt for the hook's 60 s timeout
-// (Claude Code 2.1.301, acceptance_recovery a). Drawn once next() returned.
-const PAUSED = 'paused · type a message or /check:resume to resume'
-
-test("a resumed session's first prompt: the status refreshes (0.3 s, 1 s, 2 s) draw nothing until the classic hook returned", async ($, on) => {
-  const w = world(on)
-  w.files.set(FLAG, '2026-10-19T19:12:00+0200 test') // paused before the restart
-  await start($)
-  await settle(w, () => w.statuses.length > 0)
-  expect(w.statuses).toEqual([PAUSED])
-  const classic = hold()
-  w.submitHold = classic.wait
-  const sent = $.prompt.submit({ text: 'go on', origin: COMPOSER, wait: false })
-  await settle(w, () => w.noresumeSeen.length > 0) // the classic hook runs (beneath the mod)
-  w.files.delete(FLAG) // ...and resumes the session at once
-  await w.clock.advance(300)
-  await w.clock.advance(700)
-  await w.clock.advance(2000)
-  await settle(w, () => false)
-  expect(w.statuses).toEqual([PAUSED]) // never cleared while the prompt is being submitted
-  expect(await footer($, w)).toEqual(['focus']) // nor the footer label set
-  classic.release()
-  const r = await sent
-  expect(r.text).toBe('go on')
-  await settle(w, () => w.statuses.length > 1)
-  expect(w.statuses).toEqual([PAUSED, undefined]) // drawn once, right after
-  expect(await footer($, w)).toEqual(['focus', 'check: recording'])
-})
-
-test('a refresh that read the state before a prompt came draws nothing until next() returned', async ($, on) => {
-  const w = world(on, { envReady: false })
-  w.shell = 'ready'
-  w.files.set(FLAG, '2026-10-19T19:12:00+0200 test')
-  await start($)
-  await settle(w, () => w.statuses.length > 0)
-  expect(w.statuses).toEqual([PAUSED])
-  w.files.delete(FLAG) // resumed elsewhere (another route)
-  const state = hold()
-  w.stateHold = state.wait
-  const asked = w.stateEnvs.length
-  await w.clock.advance(300) // the soon look starts, and waits in env.sh state
-  await settle(w, () => w.stateEnvs.length > asked)
-  const classic = hold()
-  w.submitHold = classic.wait
-  const sent = $.prompt.submit({ text: 'go on', origin: COMPOSER, wait: false })
-  await settle(w, () => w.noresumeSeen.length > 0)
-  state.release() // the look goes on to draw while the prompt is being submitted
-  w.stateHold = undefined
-  await settle(w, () => false)
-  expect(w.statuses).toEqual([PAUSED])
-  expect(await footer($, w)).toEqual(['focus'])
-  classic.release()
-  await sent
-  await settle(w, () => w.statuses.length > 1)
-  expect(w.statuses).toEqual([PAUSED, undefined])
-  expect(await footer($, w)).toEqual(['focus', 'check: recording'])
-})
-
-test('`pause` typed mid-turn: the ack logs at once, the status line says paused once the prompt went on', async ($, on) => {
-  const w = world(on)
-  await start($)
-  await settle(w, () => false)
-  await $.turn.start({ text: 'go', turnId: 't-q' })
-  const classic = hold()
-  w.submitHold = classic.wait
-  const sent = $.prompt.submit({ text: 'pause', origin: COMPOSER, wait: false, turnId: 't-q' })
-  await settle(w, () => w.noresumeSeen.length > 0)
-  await w.clock.advance(2000)
-  await settle(w, () => false)
-  expect(w.files.has(FLAG)).toBe(true)
-  expect(w.logs.at(-1)).toContain('paused this session')
-  expect(w.statuses).toEqual([])
-  classic.release()
-  expect((await sent).text).toBe('pause')
-  await settle(w, () => w.statuses.length > 0)
-  expect(w.statuses).toEqual([PAUSED])
-  expect(await footer($, w)).toEqual(['focus'])
 })
 
 // The pause and the gateway: the contract file is where Python looks.

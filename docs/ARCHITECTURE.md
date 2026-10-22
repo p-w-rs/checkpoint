@@ -623,20 +623,7 @@ keeps running (the code is stdlib only); envs unused for 7 days are removed.
   (recording, setting up, updating) are a dim label in the prompt footer (a
   `ui.render` hook on `SessionMode` adds `check: <state>`), and the status
   line holds only what needs the person: paused, recording FAILED, setup
-  FAILED, no pixi, unknown (`logic.statusOf`). Neither the status line nor
-  the footer label changes while a prompt is being submitted (the mod's
-  `prompt.submit` hook counts itself in `submitting`; a look that comes
-  meanwhile, or that read the state before the prompt came, is owed and
-  drawn once the hook's `next()` returned; the 2 s look draws it otherwise).
-  Measured on 2.1.301 (acceptance_recovery part a, 4 of 4 runs of the first
-  0.7.3): after `claude --resume` of a paused session, the 1 s look cleared
-  the status line ("paused" to nothing) while the classic UserPromptSubmit
-  hook of the first typed message ran; the hook was done within a second,
-  but Claude Code read its result only at its 60 s timeout (the mod's
-  `SessionMode` render, asked for at the clear, settled at the same moment),
-  and no request reached the API meanwhile. Mid-session resumes with the
-  same clear did not stall, nor did the status line set to a string; the
-  stall is Claude Code's, this only keeps the mod from setting it off.
+  FAILED, no pixi, unknown (`logic.statusOf`).
 - **Deadlines.** Every hook that waits for Python (SessionStart, a prompt or
   tool call that needs it, PostToolUse's reminder, Stop) stops it at
   `CHECKPOINT_HOOK_DEADLINE` (20 s; Claude Code's own limits are 30 and

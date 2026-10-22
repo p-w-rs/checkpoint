@@ -32,10 +32,6 @@
 //   status line with a warning sign: $.ui.status has no level). Truthful from
 //   the first draw: until SessionStart recorded the env (rt/<session>, written
 //   after the mod's session.start) env.sh says what the runtime is doing.
-//   Neither changes while a prompt is being submitted (prompt.submit draws
-//   once its next() returned): the status line cleared during the classic
-//   UserPromptSubmit hook of a resumed session's first prompt held that
-//   prompt for the hook's 60 s timeout (2.1.301).
 // - The journal (PLAN-v4 phase 2): turn.start / turn.complete, compactions
 //   and calls its gate denied go to the session's spool (env.sh spool: the
 //   same records fast.sh writes), and a timer has Python ingest the spool
@@ -84,8 +80,6 @@ let pending = false // a pause is being written: the gate holds meanwhile
 let memoryOnly = false // the pause flag couldn't be written: the gate holds anyway
 let lastStatus: string | undefined // the status line drawn ($.ui.status): attention states only
 let modeLabel: string | undefined // the footer's mode label drawn (SessionMode): the normal states
-let submitting = 0 // prompt.submit hooks in flight: the status line and the footer label wait for them
-let statusOwed = false // a refresh came meanwhile: drawn once the last of them returned
 let contractAt: string | undefined // the gateway's discovery file, as env.sh found it (the home doesn't change)
 let home: string | undefined
 let ingestedAt = 0 // the spool index's mtime when the timer last had it ingested
@@ -247,16 +241,7 @@ async function shellState($: E): Promise<string> {
   return RUNTIME_WORDS.includes(w) ? w : ''
 }
 
-// Nothing is drawn while a prompt is being submitted (measured on 2.1.301,
-// acceptance_recovery a): the status line cleared during the classic
-// UserPromptSubmit hook of a resumed session's first prompt held that prompt
-// for the hook's 60 s timeout (the 1 s look after the start lands just then).
-// The prompt.submit hook draws once its next() returned.
 async function refreshStatus($: E): Promise<void> {
-  if (submitting > 0) {
-    statusOwed = true
-    return
-  }
   let s: { text: string; warn: boolean }
   try {
     const paused = await isPaused($)
@@ -271,10 +256,6 @@ async function refreshStatus($: E): Promise<void> {
     s = statusOf({ paused, runtime, recordingFailed: !paused && (await recordingFailed($)) })
   } catch {
     s = { text: 'state unknown (/check-doctor)', warn: true }
-  }
-  if (submitting > 0) { // a prompt came while the state was read
-    statusOwed = true
-    return
   }
   const line = s.warn ? s.text : undefined
   const label = s.warn ? undefined : `check: ${s.text}`
@@ -740,64 +721,45 @@ export const register: Register = on => {
   // command waits in the queue instead): pause here, then let it go on, so
   // the classic hook answers it ("already paused") once the turn is over. A
   // typed prompt is never dropped: a dropped prompt comes back into the
-  // prompt box. While it runs the status line and the footer label stay as
-  // they are (refreshStatus); the new state is drawn once it returned.
+  // prompt box.
   on('prompt.submit', async ($, e, next) => {
-    submitting += 1
-    try {
-      // Who sent it comes first, slash commands included: a scheduled task or
-      // /loop fires its stored prompt, often a slash command, and that must
-      // not resume a paused session either.
-      const typed = e.isMeta !== true && TYPED_ORIGINS.has(e.origin.kind)
-      const kw = typed && !e.command && e.turnId !== undefined ? parseSelfPause(e.text) : null
-      if (kw) {
-        $.ui.log((await pause($, kw.now, 'typed pause')).replace(/\n/g, ' ')) // a log line is one line
+    // Who sent it comes first, slash commands included: a scheduled task or
+    // /loop fires its stored prompt, often a slash command, and that must
+    // not resume a paused session either.
+    const typed = e.isMeta !== true && TYPED_ORIGINS.has(e.origin.kind)
+    const kw = typed && !e.command && e.turnId !== undefined ? parseSelfPause(e.text) : null
+    if (kw) {
+      $.ui.log((await pause($, kw.now, 'typed pause')).replace(/\n/g, ' ')) // a log line is one line
+      return next(e)
+    }
+    const paused = await isPaused($)
+    if (paused && !typed) {
+      const sid = await $.session.id()
+      // Unmarked, the classic hook would take it as the person's and resume:
+      // if the mark can't be written, hold the prompt back (fails closed).
+      if (!(await markNoresume($, sid))) return { drop: NORESUME_FAILED }
+      try {
         return await next(e)
-      }
-      const paused = await isPaused($)
-      if (paused && !typed) {
-        const sid = await $.session.id()
-        // Unmarked, the classic hook would take it as the person's and resume:
-        // if the mark can't be written, hold the prompt back (fails closed).
-        if (!(await markNoresume($, sid))) return { drop: NORESUME_FAILED }
-        try {
-          return await next(e)
-        } finally {
-          await sh($, ['flag', 'clear-noresume', sid])
-        }
-      }
-      // The person's message resumes (the classic hook clears the flag): a
-      // plain message, /check:resume or another slash command, but not a pause
-      // keyword (`pause all`) or /check:status. A pause held only in memory
-      // (the flag couldn't be written) is lifted here, as the classic hook
-      // would lift the flag.
-      if (paused && typedResumes(e.text, e.command) && memoryOnly) {
-        memoryOnly = false
-        $.ui.log('checkpoint: resumed this session (its pause was held in memory only: the flag could not be written).')
-      }
-      const entered = await next(e)
-      if (paused) statusOwed = true // drawn below, once this hook is done
-      return entered
-    } finally {
-      submitting -= 1
-      if (submitting === 0 && statusOwed) {
-        statusOwed = false
-        void refreshStatus($)
+      } finally {
+        await sh($, ['flag', 'clear-noresume', sid])
       }
     }
-  }).catch(async ($, e, next) => {
-    if (!next.called && !(e.isMeta !== true && TYPED_ORIGINS.has(e.origin.kind))) {
-      return { drop: "checkpoint: held back a message that isn't yours, because checking the pause failed" }
+    // The person's message resumes (the classic hook clears the flag): a
+    // plain message, /check:resume or another slash command, but not a pause
+    // keyword (`pause all`) or /check:status. A pause held only in memory
+    // (the flag couldn't be written) is lifted here, as the classic hook
+    // would lift the flag.
+    if (paused && typedResumes(e.text, e.command) && memoryOnly) {
+      memoryOnly = false
+      $.ui.log('checkpoint: resumed this session (its pause was held in memory only: the flag could not be written).')
     }
-    // Held here too (a replay of next() runs nothing again); no $ call from
-    // a handler (it rejects in a re-entry): the 2 s look draws what is owed.
-    submitting += 1
-    try {
-      return await next(e)
-    } finally {
-      submitting -= 1
-    }
-  })
+    const entered = await next(e)
+    if (paused) void refreshStatus($)
+    return entered
+  }).catch(($, e, next) =>
+    next.called || (e.isMeta !== true && TYPED_ORIGINS.has(e.origin.kind))
+      ? next(e)
+      : { drop: "checkpoint: held back a message that isn't yours, because checking the pause failed" })
 
   on('command.run', { command: 'check-pause' }, async ($, e) => {
     const a = parseSelfArgs(e.args)
