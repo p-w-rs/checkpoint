@@ -134,13 +134,18 @@ config, fake API): recovery part a 4 of 4 runs 19/19 (the first prompt
 after the restart reached the fake API 0.39-0.49 s after Enter; the first
 run's script had no timer yet), then `acceptance_recovery` 40/40 (0.44 s there) and
 `acceptance_journal` 20/20. On the Debian 13 arm64 VM (Claude Code
-2.1.304), the tree at cc4b3d6 (before the revert: the guard and the old
-waits): the suite 967 passed / 0 failed under bash, 955 / 0 under dash;
-`acceptance_journal` 20/20, `acceptance_recovery` 40/40 (twice),
-`acceptance_authz` 18/18, `acceptance_independence` 49/49,
-`acceptance_gateway` 27/27. Not run this round: authz, independence,
-durability and gateway on macOS, the reverted tree on the VM, a TMPDIR of
-~180 characters.
+2.1.304), the final tree (dbea426, with gate 0.9.1 at ee2f679): the suite
+967 passed / 0 failed under bash, 955 / 0 under dash; `acceptance_journal`
+20/20, `acceptance_recovery` 40/40, `acceptance_gateway` 27/27 (earlier,
+at cc4b3d6: `acceptance_authz` 18/18, `acceptance_independence` 49/49).
+The VM's first recovery run failed part b's "the scheduled prompt fired"
+once: Claude Code 2.1.304 fires a one-shot cron task whose minute is :00 or
+:30 up to 90 s early (`oneShotMinuteMod` 30, `oneShotMaxMs` 90 s), and that
+run's target was 02:00, so it fired before the test took its request count.
+Part b now never targets such a minute and takes the count right after the
+CronCreate (pausing and reloading call no model). Not run this round:
+authz, independence, durability and gateway on macOS on the final tree, a
+TMPDIR of ~180 characters.
 Before (2026-10-21, 0.7.3, the GitHub install test's fixes): the
 suite 961 passed (macOS, sh = bash 3.2), under dash 955 (two earlier dash
 runs failed only the fast-path overhead timing: sequential medians,

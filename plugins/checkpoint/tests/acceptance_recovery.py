@@ -331,16 +331,24 @@ def part_a(E: Env) -> None:
 def part_b(E: Env) -> None:
     print("b: a scheduled callback and a plugin reload while paused", flush=True)
     P = E.project("proj-b")
-    fire = datetime.datetime.now() + datetime.timedelta(minutes=2)
-    cron = f"{fire.minute} {fire.hour} {fire.day} {fire.month} *"
     s = E.session("b1", P)
     try:
         s.wait_ready(timeout=90)
         wait(s, lambda: "recording" in s.text(), 30)
+        # Never a :00 or :30 minute: Claude Code fires a one-shot task for those up to 90 s early
+        # (2.1.304: oneShotMinuteMod 30, oneShotMaxMs 90 s), which once landed before n0 was taken.
+        fire = datetime.datetime.now() + datetime.timedelta(minutes=2)
+        if fire.minute % 30 == 0:
+            fire += datetime.timedelta(minutes=1)
+        cron = f"{fire.minute} {fire.hour} {fire.day} {fire.month} *"
         s.api.script([{"tool": "CronCreate", "input": {"cron": cron, "prompt": "keep going with the task please",
                                                     "recurring": False}}, "scheduled"])
         s.submit("Schedule a check-in")
         check("a one-shot CronCreate is scheduled", wait(s, lambda: "scheduled" in s.text(), 40))
+        # the reply to the scheduled prompt, and the count before it, right away: pausing and
+        # reloading call no model, so the next main request is the scheduled prompt whenever it fires
+        s.api.script([{"tool": "Bash", "input": {"command": "echo cron > cron.txt", "description": "cron step"}}, "ok"])
+        n0 = len(s.api.main_requests())
         sid = session_in(E.home, P)
         type_cmd(s, "/check-pause")
         check("paused", wait(s, lambda: "paused this session" in s.all_text(), 15) and paused(E.home, sid))
@@ -348,8 +356,6 @@ def part_b(E: Env) -> None:
         s.pump(6)
         check("after /reload-plugins: still paused (the mod reloaded; the pause lives on disk)",
               paused(E.home, sid) and wait(s, lambda: "check: paused" in s.text(), 20))
-        s.api.script([{"tool": "Bash", "input": {"command": "echo cron > cron.txt", "description": "cron step"}}, "ok"])
-        n0 = len(s.api.main_requests())
         fired = wait(s, lambda: len(s.api.main_requests()) > n0, 200, 1.0)
         s.pump(6)
         SUMMARY["cron_fired"] = fired
