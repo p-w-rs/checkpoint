@@ -153,11 +153,33 @@ def note_marked(marker: str) -> dict[int, str]:
     return ids
 
 
+def _zombies(pids: list[int]) -> set[int]:
+    """The ones that are zombies: dead, only not reaped by their parent yet. Linux's ps lists a zombie with
+    its start time and command (only its state says Z), so an unreaped child of the caller (the suite's own
+    test shells) looked like the same live process."""
+    if not pids:
+        return set()
+    try:
+        out = subprocess.run(["ps", "-o", "pid=,stat=", "-p", ",".join(map(str, pids))], capture_output=True,
+                             text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    found = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].startswith("Z"):
+            found.add(int(parts[0]))
+    return found
+
+
 def _kill(ids: dict[int, str], wait: float = 5.0) -> list[int]:
-    """SIGKILL each pid that is still the process it was listed as; the ones still there after `wait` s."""
+    """SIGKILL each pid that is still the process it was listed as; the ones still there after `wait` s
+    (a zombie is gone: it has ended)."""
     def same() -> list[int]:
         now = safety.identities(list(ids))
-        return [p for p, ident in ids.items() if now.get(p) == ident]
+        alive = [p for p, ident in ids.items() if now.get(p) == ident]
+        dead = _zombies(alive)
+        return [p for p in alive if p not in dead]
     for p in same():
         try:
             os.kill(p, signal.SIGKILL)
