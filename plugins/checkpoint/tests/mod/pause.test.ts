@@ -3,7 +3,7 @@
 // file system in memory, hooks/env.sh simulated (flag writes, doctor), the
 // session, the turn and the tool calls.
 import { expect, test } from 'claude-code/testing'
-import { COMPOSER, deniedText, FLAG, footer, HOME, PRESENT, ROOT, SID, settle, start, world } from './world.ts'
+import { COMPOSER, deniedText, FLAG, footer, HOME, PRESENT, ran, ROOT, SID, settle, start, world } from './world.ts'
 import { ackText, allowedTool, insideWorkDir, jobLive, parseSelfArgs, parseSelfPause, safeId, typedResumes } from '../../hooks/mod/logic.ts'
 
 test('pure helpers agree with the Python side', async () => {
@@ -53,7 +53,7 @@ test('/check-pause mid-turn: flag written, turn aborted, ack says what still run
   expect(out.text).toContain('checkpoint: paused this session (at once')
   expect(out.text).toContain('Stopped the running turn.')
   expect(out.text).toContain('Still running: Bash `sleep 31.5`, left running')
-  expect(out.text).toContain('Tool calls stay held until you resume')
+  expect(out.text).toContain('Tool calls stay held until you resume: type a message (any non-/check command resumes) or /check:resume.')
   w.release.get('slow-1')!()
   await running
   const denied = await $.tool.call({ tool: 'Bash', tool_use_id: 'b2', command: 'echo second > second.txt', description: 'x' } as never)
@@ -275,6 +275,26 @@ test('/check-doctor reports Claude Code, surfaces and the runtime half', async (
   expect(s.text).toContain('Sessions:')
 })
 
+test('/check-doctor adds the lines only Python knows when a runtime answers (a gateway job stuck unknown: forget-job), and none without one', async ($, on) => {
+  const stuck = 'gateway: job deploy (deploy-1) has been unknown for 8 day(s) with no word from the gateway: `checkpoint forget-job deploy-1` releases it'
+  const w = world(on, { answers: { 'doctor-py': () => ran(0, `journal: 3 task(s)\n${stuck}\n`) } })
+  await start($)
+  const r = await $.command.run({ command: 'check-doctor', args: '', origin: COMPOSER, presentation: PRESENT })
+  expect(r.text).toContain('- runtime: ready')
+  expect(r.text).toContain(`- ${stuck}`)
+  expect(r.text.indexOf('- runtime: ready')).toBeLessThan(r.text.indexOf('forget-job'))
+  expect(w.runs.some(x => x[2] === 'run' && x[3] === 'doctor-py' && x[4] === SID)).toBe(true)
+})
+
+test('/check-doctor without a runtime: the shell report alone, no failure line for the Python half', async ($, on) => {
+  world(on, { answers: { 'doctor-py': () => ran(75) } })
+  await start($)
+  const r = await $.command.run({ command: 'check-doctor', args: '', origin: COMPOSER, presentation: PRESENT })
+  expect(r.text).toContain('- runtime: ready')
+  expect(r.text).not.toContain('exit 75')
+  expect(r.text).not.toContain('forget-job')
+})
+
 test('ack text names jobs and other calls', async () => {
   const t = ackText({ already: false, wrote: true, turn: 'Stopped the running turn.', calls: [{ id: 'a1', tool: 'Agent', started: 0 }], stopped: [], jobs: [{ id: 'train-1', name: 'train' }], tookMs: 30 })
   expect(t).toContain('in 0.03 s')
@@ -298,7 +318,8 @@ test('jobLive follows jobs.is_live: a gateway job whose outcome is unknown (gone
   expect(jobLive({ owner: 'gateway', state: 'unknown' })).toBe(true)
   expect(jobLive({ owner: 'gateway', state: 'waiting_auth' })).toBe(true)
   expect(jobLive({ owner: 'gateway', state: 'suspended' })).toBe(true)
-  for (const st of ['exited', 'failed', 'canceled']) expect(jobLive({ owner: 'gateway', state: st })).toBe(false)
+  // 'released': the person released a job stuck unknown (forget-job): not live for checkpoint any more
+  for (const st of ['exited', 'failed', 'canceled', 'released']) expect(jobLive({ owner: 'gateway', state: st })).toBe(false)
   expect(jobLive({ state: 'running' })).toBe(true)
   expect(jobLive({ state: 'stop_failed' })).toBe(true)
   for (const st of ['exited', 'killed', 'vanished']) expect(jobLive({ state: st })).toBe(false)

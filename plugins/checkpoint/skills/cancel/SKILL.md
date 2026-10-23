@@ -1,6 +1,6 @@
 ---
 name: cancel
-description: "Cancel this task: it ends (history kept), its running jobs are stopped (interrupt) or left running and released (detach)"
+description: "Cancel this task: it ends (history kept), its running jobs are stopped (interrupt) or left running, detached from it (detach)"
 argument-hint: "[interrupt|detach] [note]"
 disable-model-invocation: true
 ---

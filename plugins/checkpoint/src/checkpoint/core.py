@@ -35,15 +35,21 @@ def session_tracker(sid: str, dirs: Iterable[str]) -> dict[str, Any] | None:
 
 # -- checkpoint ---------------------------------------------------------------
 
-def _git(cwd: str, *args: str) -> str:
+def _git_rc(cwd: str, *args: str) -> tuple[int, str]:
     """Read-only git: GIT_OPTIONAL_LOCKS=0 so `status` never rewrites the
-    index, with the user's umask (checkpoint's own is 077)."""
+    index, with the user's umask (checkpoint's own is 077). Its exit code
+    (-1 when it can't run) and output."""
     try:
         r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=5,
                            env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"), umask=state.user_umask())
     except (OSError, subprocess.SubprocessError):
-        return ""
-    return r.stdout if r.returncode == 0 else ""
+        return -1, ""
+    return r.returncode, r.stdout
+
+
+def _git(cwd: str, *args: str) -> str:
+    rc, out = _git_rc(cwd, *args)
+    return out if rc == 0 else ""
 
 
 def git_snapshot(cwd: str) -> dict[str, Any]:
@@ -62,33 +68,116 @@ def checkpoint_path(sid: str, t: dict[str, Any] | None) -> Path:
     return state.p("checkpoints", state.safe_id(sid) + ".json")
 
 
+def _cp_jobs(sid: str) -> list[dict[str, Any]]:
+    """The session's jobs as a checkpoint keeps them: what a resume compares
+    (id, state) and names, the command scrubbed; no log path or env file."""
+    out = []
+    for j in jobs.status(session_id=sid).get("jobs", []):
+        rec = {k: j[k] for k in ("id", "name", "state", "exit_code", "supervisor", "task") if j.get(k) is not None}
+        if j.get("command"):
+            rec["command"] = sanitize.clip(sanitize.scrub(j["command"]), 200)
+        out.append(rec)
+    return out
+
+
 def write_checkpoint(sid: str, reason: str = "", dirs: Iterable[str] | None = None) -> Path:
     """Plain facts at pause time. Written by the gate on its first deny and
-    refreshed by Stop (which doesn't fire when continue:false ends a turn)."""
+    refreshed by Stop (which doesn't fire when continue:false ends a turn).
+    Next to a tracker it lands in the user's project, so everything in it is
+    scrubbed here (the commands of the last calls, the jobs and the
+    interrupted commands; then the whole of it once more), and the work
+    folder is kept out of git (ensure_excluded)."""
     sess = state.load_session(sid)
     cwd = sess.get("cwd") or ""
     t = session_tracker(sid, list(dirs) if dirs is not None else [cwd])
     lines = transcript.tail_lines(sess["transcript_path"]) if sess.get("transcript_path") else []
+    path = checkpoint_path(sid, t)
+    if t:
+        ensure_excluded(path)     # first: the git state below then doesn't list the work folder
     data = {
         "session_id": sid,
         "cwd": cwd,
         "paused_at": sess.get("paused_at") or state.now_iso(),
         "paused_ts": sess.get("paused_ts") or time.time(),
         "written_at": state.now_iso(),
-        "reason": reason or sess.get("paused_by") or "",
+        "reason": sanitize.clip(sanitize.scrub(reason or sess.get("paused_by") or ""), 200),
         "tracker": t["path"] if t else None,
         "stages_in_progress": [f'{s["n"]}. {s["stage"]}' for s in (t["in_progress"] if t else [])],
         "last_tool_calls": transcript.recent_tool_calls(lines, 10),
         "git": git_snapshot(cwd),
-        "jobs": jobs.status(session_id=sid).get("jobs", []),
-        "interrupted": sess.get("interrupted") or [],
+        "jobs": _cp_jobs(sid),
+        "interrupted": [dict({k: c[k] for k in ("tool_use_id", "at", "processes", "sigkill", "survivors") if k in c},
+                             command=sanitize.clip(sanitize.scrub(c.get("command") or ""), 300))
+                        for c in sess.get("interrupted") or [] if isinstance(c, dict)],
     }
-    path = checkpoint_path(sid, t)
-    state.write_json(path, data)
+    state.write_json(path, sanitize.scrub_value(data))
     state.update_session(sid, checkpoint=str(path), checkpoint_written=True,
                          task=t["slug"] if t else sess.get("task"))
     pause_checkpoint(sid)
     return path
+
+
+def ensure_excluded(path: Path) -> str:
+    """Keep the work folder (CHECKPOINT_WORK_DIR) that holds `path` out of
+    git: when `path` is in a git work tree and git doesn't ignore it yet,
+    append the folder to the clone's local exclude file (`git rev-parse
+    --git-path info/exclude`, never committed). Never when the repository
+    tracks anything in that folder (the user commits trackers), and never
+    twice (git check-ignore says when it is ignored already, and the line
+    already in the file is never added again: a `!.work/` in .gitignore
+    keeps check-ignore saying no). Returns what
+    it did ('' when nothing; never raises: the checkpoint is written
+    either way)."""
+    try:
+        name = state.work_dir_name().strip("/")
+        work = path.parent.parent          # <project>/<work>/<task>/checkpoint.json
+        if not name or not str(work).endswith("/" + name) or not work.is_dir():
+            return ""
+        here = str(work.parent)
+        rc, _ = _git_rc(here, "check-ignore", "-q", str(path))
+        if rc != 1:
+            return ""      # ignored already (0), or not a repository / git missing (128, -1)
+        rc, tracked = _git_rc(here, "ls-files", "--", str(work))
+        if rc != 0 or tracked.strip():
+            return ""      # the repository tracks trackers there: the user's choice
+        rc, top = _git_rc(here, "rev-parse", "--show-toplevel")
+        rc2, exc = _git_rc(here, "rev-parse", "--git-path", "info/exclude")
+        if rc or rc2 or not top.strip() or not exc.strip():
+            return ""
+        rel = os.path.relpath(work.resolve(), Path(top.strip()).resolve())
+        if rel.startswith(".."):
+            return ""
+        # The session note's form (`.work/`, any depth) for a plain name;
+        # anchored at the top when the name has folders in it.
+        line = f"{name}/" if "/" not in name else f"/{rel}/"
+        target = Path(here, exc.strip())
+        try:
+            # Never twice: a `!.work/` in .gitignore keeps check-ignore saying
+            # "not ignored" whatever the exclude file holds. (Two sessions
+            # writing their first checkpoint at the same moment can still both
+            # append it: the look and the append are two steps. A second line
+            # is harmless.)
+            if line in target.read_text(errors="replace").splitlines():
+                return ""
+        except FileNotFoundError:
+            pass
+        target.parent.mkdir(parents=True, exist_ok=True)
+        new = not target.exists()
+        fd = os.open(target, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o666)
+        try:
+            if new:
+                os.fchmod(fd, 0o666 & ~state.user_umask())   # the user's file, not checkpoint's (077)
+            lead = ""
+            if not new and target.stat().st_size:
+                with open(target, "rb") as f:
+                    f.seek(-1, 2)
+                    lead = "" if f.read(1) == b"\n" else "\n"
+            os.write(fd, f"{lead}{line}\n".encode())
+        finally:
+            os.close(fd)
+        return f"added {line} to {target}"
+    except (OSError, ValueError):
+        return ""
 
 
 def pause_checkpoint(sid: str) -> str:
@@ -178,7 +267,7 @@ def list_checkpoints(sid: str, ref: str = "") -> str:
     still current (/check:list, /check-list)."""
     if sid:
         capture.ingest(sid)
-    task = find_task(ref, state.load_session(sid).get("cwd") or "" if sid else "") if ref else (
+    task = find_task(ref, state.load_session(sid).get("cwd") or "" if sid else "", sid) if ref else (
         state.load_session(sid).get("task_id") if sid else "") or ""
     if not task:
         return (f"checkpoint: no task matches '{ref}' (`tasks` lists them)." if ref else
@@ -215,15 +304,25 @@ def task_summary(sid: str = "", task: str = "", limit: int = summary.LIMIT) -> s
     return summary.build(task, limit=limit, cwd=state.load_session(sid).get("cwd") or "" if sid else "").text
 
 
-def find_task(ref: str, cwd: str = "") -> str:
+def find_task(ref: str, cwd: str = "", sid: str = "") -> str:
     """A task id from a reference: a task id or a unique prefix of one, a
-    session id (prefix), or `last` (the newest task in this project)."""
+    session id (prefix), or `last`: the newest task in this project; asked
+    by a session (`sid`), never its own task (resuming that does nothing:
+    after a crash the new session's first message starts a task of its
+    own, and its first answer makes tool calls), and an interrupted one (no
+    clean end, its Claude process gone) before a newer one that wasn't."""
     ref = (ref or "").strip()
     if not ref:
         return ""
     if ref == "last":
-        tl = summary.task_list(cwd, limit=1)
-        return tl[0]["task"] if tl else ""
+        own = (state.load_session(sid).get("task_id") or "") if sid else ""
+        rows = [m for m in summary.task_list(cwd, limit=10) if not (sid and own and m["task"] == own)]
+        if sid and rows:
+            table = procs.table()
+            for m in rows:
+                if (not cwd or (m.get("cwd") or "") == cwd) and summary.interrupted(m, table):
+                    return m["task"]
+        return rows[0]["task"] if rows else ""
     ids = journal.tasks()
     if ref in ids:
         return ref
@@ -400,7 +499,8 @@ def pause(sid: str, args: list[str], by: str, echo: dict[str, Any] | None = None
         before = state.load_session(sid)
         fresh = state.set_paused(sid, by, now=now)
         if fresh:
-            msgs.append("Paused: this session stops at its next tool call. Any message resumes it.")
+            msgs.append("Paused: this session stops at its next tool call. Type a message to resume it (any "
+                        "non-/check command resumes, and /check:resume).")
             if not now:
                 fg = running_commands(sid)
                 if fg:
@@ -540,12 +640,13 @@ def resume_context(t: dict[str, Any] | None, cp: dict[str, Any] | None, cwd: str
             parts.append("Since the pause:\n- " + "\n- ".join(ch))
     if task:
         try:
-            r = recovery.reconcile(task, sid, checkpoint=checkpoint, cwd=cwd, prompt=prompt, selected=selected)
-            if sid:
-                recovery.record(sid, r, why)
-            # The summary gets what the reconciliation leaves (it is cut first).
-            parts.append(r.text(lambda n: summary.build(task, limit=n, cwd=cwd).text,
-                                limit=RESUME_LIMIT, summary_max=4000))
+            with sanitize.remembered():     # the summary scrubs the commands reconcile scrubbed
+                r = recovery.reconcile(task, sid, checkpoint=checkpoint, cwd=cwd, prompt=prompt, selected=selected)
+                if sid:
+                    recovery.record(sid, r, why)
+                # The summary gets what the reconciliation leaves (it is cut first).
+                parts.append(r.text(lambda n: summary.build(task, limit=n, cwd=cwd).text,
+                                    limit=RESUME_LIMIT, summary_max=4000))
         except Exception as e:  # noqa: BLE001  the tracker and checkpoint still say something
             parts.append(f"(reconciling with the journal failed: {type(e).__name__}: {e}; check the files and "
                          "anything that was running before going on)")
@@ -557,15 +658,18 @@ def resume_context(t: dict[str, Any] | None, cp: dict[str, Any] | None, cwd: str
         if t["open"]:
             parts.append("Open stages: " + "; ".join(f'{s["n"]}. {s["stage"]} ({s["status"]})'
                                                      for s in t["open"]))
+    trackers = state.trackers_on()
     if cp and cp.get("interrupted"):
         parts.append(f"`pause now` stopped {_cmds(cp['interrupted'])} before it finished: its partial effects "
                      "are possible. Check what it had done (files, output, remote state) before running any of it "
-                     "again, and if a tracker stage covers it, mark that stage 'interrupted' with what you found.")
+                     "again" + (", and if a tracker stage covers it, mark that stage 'interrupted' with what you "
+                                "found." if trackers else "."))
     if cp:
         parts.append("Checkpoint at pause:\n" + json.dumps(sanitize.scrub_value(
             {k: cp.get(k) for k in ("paused_at", "stages_in_progress", "last_tool_calls", "jobs")}), indent=1)[:3000])
-    parts.append("Resume: do the 'Check first' items above, then continue from the plan (the tracker's 'Next "
-                 "action' if there is one). Keep the tracker current.")
+    # CHECKPOINT_TRACKERS=off: nothing asks for a tracker (state.trackers_on).
+    parts.append("Resume: do the 'Check first' items above, then continue from the plan" + (
+        " (the tracker's 'Next action' if there is one). Keep the tracker current." if trackers else "."))
     parts.append("</checkpoint-resume>")
     return "\n\n".join(parts)
 
@@ -604,11 +708,11 @@ def resume_here(sid: str, dirs: Iterable[str] | None = None, prompt: str = "") -
     return ctx
 
 
-def resolve_ref(cwd: str, ref: str) -> tuple[dict[str, Any] | None, str, str]:
-    """What /check:resume <ref> names: (its tracker or None, a journal task
-    id or '', a checkpoint id or ''). Reads only."""
+def resolve_ref(cwd: str, ref: str, sid: str = "") -> tuple[dict[str, Any] | None, str, str]:
+    """What /check:resume <ref> names in session `sid`: (its tracker or
+    None, a journal task id or '', a checkpoint id or ''). Reads only."""
     t = tracker.by_slug(cwd, ref)
-    task = find_task(ref, cwd)
+    task = find_task(ref, cwd, sid)
     chosen = ""
     if not task:
         ctask, rec = recovery.find_checkpoint(ref)
@@ -632,7 +736,7 @@ def resume_task(cwd: str, slug: str, sid: str = "", prompt: str = "",
     reconcile against it), which this session then adopts: its records go to
     that task's journal from here on (a finished task is reopened). Nothing
     changes when nothing matches."""
-    t, task, chosen = resolved or resolve_ref(cwd, slug)
+    t, task, chosen = resolved or resolve_ref(cwd, slug, sid)
     if not t and not task:
         return no_match(cwd, slug)
     reopened: dict[str, Any] = {}
@@ -711,7 +815,7 @@ def resume_now(sid: str, ref: str = "") -> tuple[bool, str]:
     if ref:
         ok, cid = select(sid, ref)
         if not ok:
-            t2 = find_task(ref, state.load_session(sid).get("cwd") or "")
+            t2 = find_task(ref, state.load_session(sid).get("cwd") or "", sid)
             if not t2:
                 return False, cid
             adopt(sid, t2)
@@ -901,9 +1005,10 @@ def complete(sid: str, args: list[str], by: str = "user") -> str:
 
 
 def stop_job(sid: str, args: list[str]) -> str:
-    """/check:stop <job>: terminate one job of checkpoint's own runner (its
-    process group: SIGTERM, SIGKILL after the grace period). Without a name,
-    lists the running ones."""
+    """/check:stop <job>: terminate one job: checkpoint's own runner's (its
+    process group: SIGTERM, SIGKILL after the grace period), or a gateway
+    job through the gateway (its stop, never a signal of checkpoint's own).
+    Without a name, lists the running ones."""
     if not args:
         running = [j for j in jobs.refresh_all().values() if jobs.is_live(j)]
         if not running:
@@ -916,6 +1021,10 @@ def stop_job(sid: str, args: list[str]) -> str:
     j = jobs.find(ref)
     if not j:
         return f"No job matches '{ref}' (/check:stop alone lists the running ones)."
+    if j.get("state") == "released":
+        return (f"Job {j['name']} ({j['id']}, gateway job {j.get('gateway_job')}) was released (forget-job) after it "
+                "was unknown for days with no word from the gateway: checkpoint no longer follows it, and its outcome "
+                "is unknown. If it still runs, stop it with the gateway's own tools.")
     if not jobs.is_live(j):
         return f"Job {j['name']} ({j['id']}) isn't running: {j.get('state')}" + (
             f" (exit {j.get('exit_code')})" if j.get("exit_code") is not None else "") + "."
@@ -1017,25 +1126,26 @@ def journal_doctor(sid: str = "") -> list[str]:
 # -- status -------------------------------------------------------------------
 
 def status_text(sid: str = "") -> str:
-    """Sessions, pause state, jobs; with a session, also its task's journal
-    state and recovery summary."""
+    """Sessions, pause state, jobs; with a session (the caller's), also this
+    project's unfinished tasks and its own task's journal state and recovery
+    summary (never another session's: without one, none)."""
     lines = []
     table = procs.table()
     rows = []
     live = {s["session_id"] for s in state.live_sessions(table)}
     for s in state.all_sessions():
-        sid = s["session_id"]
-        paused = state.is_paused(sid)
-        if sid not in live and not paused:
+        ssid = s["session_id"]     # not `sid`: that is the caller's, used below
+        paused = state.is_paused(ssid)
+        if ssid not in live and not paused:
             continue
         st = "paused" if paused else "working/idle"
-        if sid not in live:
+        if ssid not in live:
             st += " (process gone)"
         task = s.get("task") or ""
         if not task and s.get("cwd"):
-            t = session_tracker(sid, [s["cwd"]])
+            t = session_tracker(ssid, [s["cwd"]])
             task = t["slug"] if t else ""
-        rows.append(f"- {sid[:8]}  {st:<22} {s.get('cwd', '?')}  {('task: ' + task) if task else ''}".rstrip())
+        rows.append(f"- {ssid[:8]}  {st:<22} {s.get('cwd', '?')}  {('task: ' + task) if task else ''}".rstrip())
     lines.append("Sessions:" if rows else "No live sessions recorded.")
     lines.extend(rows)
     degraded = [m for m in state.degraded_markers(time.time() - state.DEGRADED_SHOW_HOURS * 3600)
@@ -1058,6 +1168,8 @@ def status_text(sid: str = "") -> str:
             ex = f" exit {j['exit_code']}" if j.get("exit_code") is not None else ""
             if j.get("supervisor") == "gateway":
                 why = f" ({j['unknown_why']})" if j.get("unknown_why") else ""
+                if j.get("state") == "released":
+                    why = " (by you, forget-job: its outcome was never known)"
                 pol = f", on_pause {j['on_pause']}" if j.get("on_pause") else ""
                 lines.append(f"- {j['name']} [{j['id']}]: {j['state']}{ex}{why}, {j.get('runtime_s', '?')} s; gateway "
                              f"job {j.get('gateway_job')}{pol}")
@@ -1066,8 +1178,45 @@ def status_text(sid: str = "") -> str:
             lines.append(f"- {j['name']} [{j['id']}]: {j['state']}{ex}, {j.get('runtime_s', '?')} s; checkpoint's "
                          f"runner{gw}")
     if sid:
+        lines.extend(project_tasks_status(sid))
         lines.extend(journal_status(sid))
     return "\n".join(lines)
+
+
+def unfinished_tasks(cwd: str, own: str = "", limit: int = 5) -> list[dict[str, Any]]:
+    """This project's tasks that were neither completed nor canceled, newest
+    first, without `own` (the caller's): their listing records (goal,
+    last_session, ...) with `interrupted` (no clean end, its Claude process
+    gone) set."""
+    out: list[dict[str, Any]] = []
+    if not cwd:
+        return out
+    table = None
+    for m in summary.task_list(cwd, limit=max(limit * 3, 10)):
+        if m.get("task") == own or (m.get("cwd") or "") != cwd or (m.get("finished") or {}).get("how"):
+            continue
+        if table is None:
+            table = procs.table()
+        out.append(dict(m, interrupted=summary.interrupted(m, table)))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def project_tasks_status(sid: str) -> list[str]:
+    """/check:status: this project's unfinished tasks (other than this
+    session's own), with how to continue each."""
+    sess = state.load_session(sid)
+    rows = unfinished_tasks(sess.get("cwd") or "", own=sess.get("task_id") or "")
+    if not rows:
+        return []
+    out = ["Unfinished tasks in this project (journal; /check:resume <task> continues one here):"]
+    for m in rows:
+        how = "interrupted (no clean end)" if m["interrupted"] else "ended without /check:complete"
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(m.get("updated") or 0)))
+        resume = f"; `claude --resume {m['last_session']}`" if m.get("last_session") else ""
+        out.append(f"- {m['task']}  {when}  {how}: {sanitize.clip(m.get('goal'), 80)}{resume}")
+    return out
 
 
 def journal_status(sid: str, limit: int = 3500) -> list[str]:
@@ -1128,8 +1277,61 @@ def gateway_status_line(g: gateway.Gateway | None = None) -> str:
     return f"Gateway: not available ({g.reason}). Jobs run in {OWN_RUNNER_LIMITS}."
 
 
+def forget_job(name: str) -> tuple[bool, str]:
+    """`checkpoint forget-job <id>` (the person, in a terminal; never a tool
+    call): release a gateway job stuck unknown with no word from the gateway
+    for over jobs.RELEASE_AFTER_DAYS (jobs.release), and record it in its
+    task's journal (`job.released`). Its outcome stays unknown."""
+    r = jobs.release(name)
+    if not r.get("ok"):
+        return False, f"Not released: {r.get('reason')}. Nothing changed."
+    j = r["job"]
+    task = r.get("task_id") or ""
+    note = ""
+    if task and journal.jdir(task).is_dir():
+        last = j.get("last_seen") or {}
+        try:
+            journal.append(task, [{"kind": "job.released", "op": f"release:{j['id']}", "session": "",
+                                   "data": {"job": j["id"], "name": sanitize.clip(sanitize.scrub(j.get("name")), 80),
+                                            "gateway_job": sanitize.clip(str(j.get("gateway_job") or ""), 80),
+                                            "by": "user", "unknown_days": r.get("unknown_days"),
+                                            "last_state": sanitize.clip(str(last.get("state") or ""), 30),
+                                            "last_seen_ts": last.get("at") if isinstance(last.get("at"), (int, float))
+                                            else None}}], sync=True)
+        except journal.JournalError as e:
+            note = f" (its task's journal couldn't record it: {sanitize.clip(str(e), 200)})"
+    return True, (f"Released job {j.get('name')} ({j['id']}, gateway job {j.get('gateway_job')}): unknown for "
+                  f"{r.get('unknown_days')} day(s) with no word from the gateway. Checkpoint no longer waits for it: it "
+                  "no longer keeps its task's journal from retention, doesn't count as running, and the gateway isn't "
+                  "asked about it any more. Its outcome stays unknown: if it ran, its effects are there; check them "
+                  "before doing its work again."
+                  + note)
+
+
+def stuck_jobs_doctor() -> list[str]:
+    """/check:doctor: gateway jobs unknown for over jobs.RELEASE_AFTER_DAYS
+    with no word from the gateway, and how the person can release one."""
+    try:
+        stuck = [j for j in jobs.refresh_all().values() if jobs.releasable(j)]
+    except Exception:  # noqa: BLE001  the doctor still answers
+        return []
+    out = []
+    for j in sorted(stuck, key=jobs.unknown_since)[:5]:
+        days = (time.time() - jobs.unknown_since(j)) / 86400
+        out.append(f"gateway: job {sanitize.clip(j.get('name'), 60)} ({j['id']}) has been unknown for {days:.0f} day(s) "
+                   f"with no word from the gateway ({sanitize.clip(j.get('unknown_why') or 'its state is not proven', 120)}):"
+                   " it keeps its task's journal from retention and counts as possibly running. If you know it is "
+                   "over, "
+                   f"`{state.cli('forget-job', j['id'])}` releases it (nothing does that on its own; its outcome stays "
+                   "unknown).")
+    if len(stuck) > 5:
+        out.append(f"gateway: and {len(stuck) - 5} more such job(s) (`{state.cli('status')}` lists them)")
+    return out
+
+
 def gateway_doctor(sid: str = "") -> list[str]:
-    """/check:doctor's Python lines on the gateway: discovery, then one call."""
+    """/check:doctor's Python lines on the gateway: discovery, then one call;
+    the jobs stuck unknown that the person can release."""
     g = gateway.discover()
     out = ["gateway: " + (g.line()[len("gateway: "):] if g.line().startswith("gateway: ") else g.line())]
     if g.ok:
@@ -1147,7 +1349,7 @@ def gateway_doctor(sid: str = "") -> list[str]:
         elif gp.get("held") and not gp.get("delivered"):
             out.append("gateway: this session's pause may or may not have reached the gateway (its answer was lost) "
                        "and isn't sent again while a job with on_pause interrupt could be signalled twice")
-    return out
+    return out + stuck_jobs_doctor()
 
 
 def _gw_lock(sid: str):

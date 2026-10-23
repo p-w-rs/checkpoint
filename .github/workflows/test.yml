@@ -1,0 +1,51 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 6 * * 1"   # weekly, with the newest pixi and Claude Code
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}${{ matrix.pixi == 'v0.68.0' && ' (oldest pixi)' || '' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel]
+        pixi: [v0.81.0]
+        include:
+          - os: ubuntu-24.04
+            pixi: v0.68.0      # requires-pixi's floor
+    env:
+      # The tested Claude Code for `claude plugin test` / `validate`; the weekly run takes the newest.
+      CLAUDE_VERSION: ${{ github.event_name == 'schedule' && 'latest' || '2.1.301' }}
+    defaults:
+      run:
+        working-directory: plugins/checkpoint
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: prefix-dev/setup-pixi@9dabb60412d3d2d967a8d682f7ce01317af40514  # v0.11.0
+        with:
+          pixi-version: ${{ github.event_name == 'schedule' && 'latest' || matrix.pixi }}
+          manifest-path: plugins/checkpoint/pixi.toml
+          locked: true
+      - name: Claude Code (for the mod's tests and validate; no sign-in needed)
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Suite (sh)
+        run: |
+          export CLAUDE_CONFIG_DIR="$RUNNER_TEMP/claude-config" TMPDIR="$RUNNER_TEMP"
+          pixi run --locked test
+      - name: Suite (dash)
+        run: |
+          export CLAUDE_CONFIG_DIR="$RUNNER_TEMP/claude-config" TMPDIR="$RUNNER_TEMP"
+          CHECKPOINT_TEST_SH=/bin/dash pixi run --locked test

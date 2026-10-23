@@ -148,6 +148,8 @@ doctor)
         n=0
         [ -f "$st/spool/$sid/index" ] && n=$(ls "$st/spool/$sid" 2>/dev/null | grep -c '\.ev$')
         echo "spool: $n record(s) of this session waiting to be ingested ($st/spool/$sid)"
+        ck_body "$sid"
+        [ -n "$CK_BODY" ] && echo "spool: events are kept without their contents ($CK_BODY): which tool ran, its ids and sizes"
         if [ -f "$st/spool-errors/$sid" ]; then
             echo "spool: RECORDING FAILED since $({ LC_ALL=C tr -c '[:print:]' ' ' < "$st/spool-errors/$sid"; } 2>/dev/null | sed 's/ *$//' | cut -c 1-200)"
         elif [ -f "$st/spool-errors/$sid.last" ]; then

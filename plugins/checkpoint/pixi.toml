@@ -12,7 +12,7 @@ channels = ["conda-forge"]
 platforms = ["osx-arm64", "osx-64", "linux-64", "linux-aarch64"]
 # The oldest pixi that reads pixi.lock (format 7): 0.67.2 refuses it. Tested
 # with `pixi install --locked`: 0.68.0, 0.68.1, 0.72.0, 0.76.0, 0.79.0, 0.81.0,
-# 0.82.0 (docs/ARCHITECTURE.md, "Runtime"). No upper bound.
+# 0.82.0 (docs/dev/ARCHITECTURE.md, "The runtime"). No upper bound.
 requires-pixi = ">=0.68.0"
 
 [dependencies]

@@ -57,13 +57,13 @@ TOOLS: list[dict[str, Any]] = [
                 "task": {"type": "string", "description": "tracker task slug this job belongs to"},
                 "on_cancel": {"type": "string", "enum": ["interrupt", "detach"],
                               "description": ("what /check:cancel does with this job if the user cancels the task: "
-                                              "interrupt (default: stop it) or detach (leave it running, released "
+                                              "interrupt (default: stop it) or detach (leave it running, detached "
                                               "from the task)")},
                 "on_pause": {"type": "string", "enum": list(gateway.ON_PAUSE),
                              "description": ("what pausing the task does to this job (gateway jobs): continue "
                                              "(keeps running; the default unless the task's policy says otherwise), "
                                              "interrupt (SIGINT, then SIGTERM after 10 s), suspend (SIGSTOP until "
-                                             "resumed), detach (keeps running, released from the task)")},
+                                             "resumed), detach (keeps running, detached from the task)")},
             },
             "required": ["name", "redo_hint"],
         },
@@ -82,7 +82,8 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "job_tail",
-        "description": "The last lines of a job's output log.",
+        "description": ("The last lines of a job's output log (a log keeps its last 32-64 MB; "
+                        "`log_truncated` says when earlier output was dropped)."),
         "inputSchema": {
             "type": "object",
             "properties": {"name": {"type": "string"},

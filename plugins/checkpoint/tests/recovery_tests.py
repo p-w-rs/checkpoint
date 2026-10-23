@@ -472,7 +472,7 @@ out = hook("UserPromptSubmit", rpay(SJ, PP, TJ, prompt="/check:cancel", prompt_i
 cres = ctx(out)
 reg = jobs.refresh_all()
 check("/check:cancel: each job's own policy: train-a (interrupt, the default) stopped, train-b (detach) left running "
-      "and released; an unrelated job untouched",
+      "and detached; an unrelated job untouched",
       lambda: reg[j1["id"]]["state"] == "killed" and reg[j2["id"]]["state"] == "running"
       and reg[j2["id"]].get("detached") and reg[j3["id"]]["state"] == "running"
       and "train-a" in cres and "stopped" in cres and "train-b" in cres and "detached, still running" in cres)
@@ -491,7 +491,7 @@ capture.ingest(SJ)
 TJ2 = task_of(SJ)
 j4 = jobs.start("train-c", command="sleep 123", cwd=str(PP), session_id=SJ, task_id=TJ2)["job"]
 msg = core.cancel(SJ, ["detach"])
-check("/check:cancel detach: every job of the task left running and released, said so",
+check("/check:cancel detach: every job of the task left running and detached, said so",
       lambda: jobs.refresh_all()[j4["id"]]["state"] == "running" and jobs.refresh_all()[j4["id"]].get("detached")
       and "detached, still running" in msg)
 out = hook("UserPromptSubmit", rpay(SJ, PP, TJ, prompt="/check:stop", prompt_id="j5"), EJ)
@@ -571,6 +571,10 @@ check(f"no synthetic secret of the corpus ({len(CORPUS)} contexts) in the export
       "the sanitizer (every string scrubbed again; sensitive keys dropped)", lambda: not leaked)
 if leaked:
     print(f"       (files holding a canary: {leaked})")
+check("...its first line says scrubbing is pattern-based (review before sharing), and so does the hook's answer",
+      lambda: Path(path).read_text().splitlines()[1].lstrip().startswith('"_review": "Scrubbing is pattern-based')
+      and "review the file before sharing" in ctx(out) and "masked by pattern" in bundle.get("note", "")
+      and "holds no" not in bundle.get("note", ""))
 check("...and no transcript or file contents: references only (paths, ids)",
       lambda: "transcripts" in bundle["references"] and "content" not in json.dumps(bundle["references"]))
 ok3, p3 = recovery.export(TXT, str(RT))

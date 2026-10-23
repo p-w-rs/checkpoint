@@ -1,11 +1,14 @@
 # Checkpoint v4 plan (authoritative from 2026-10-19)
 
+> History: the plan the 0.3.0-0.7.3 build followed, kept as written (not updated for 0.8.0; the current design is [ARCHITECTURE.md](ARCHITECTURE.md)). "Brief §N" names a section of the upgrade brief the plan was written from; the brief isn't in this repository, and each row here says what its section asked.
+
 This plan implements the upgrade brief for checkpoint (`check@checkpoint`). It supersedes
 DESIGN.md where they conflict; DESIGN.md stays the reference for what this plan keeps (the
 tracker convention, the fast sh pre-filter, the jobs runner, the pause/resume vocabulary).
-The gateway's half is `../gateway/docs/PLAN-v4.md`; the contract between them is
-[CONTRACT-v1.md](CONTRACT-v1.md) (identical copy of the gateway's). Platform evidence:
-`../gateway/docs/FEASIBILITY-v4.md`.
+The gateway's half is its own PLAN-v4.md; the contract between them is
+[CONTRACT-v1.md](../CONTRACT-v1.md) (identical copy of the gateway's). Platform evidence:
+the gateway's FEASIBILITY-v4.md. Both are in the
+[gateway's docs](https://github.com/p-w-rs/gateway/tree/main/docs/dev).
 
 Checked against Claude Code CLI 2.1.301 / desktop 2.1.299 (mods need 2.1.287 terminal,
 2.1.286 desktop) and pixi 0.81.0 on macOS 25.6 arm64; the final acceptance (2026-10-21) also
@@ -314,9 +317,9 @@ config: "installed copies"; macOS = Claude Code 2.1.301, VM = the Debian VM's 2.
 
 ## Rules for this work
 
-- Leave the user's live state alone: a v0.1-wrapper job (pid 94342) runs from the real
-  CHECKPOINT_HOME; migration must keep it visible and stoppable, and tests use scratch
-  CHECKPOINT_HOME and CHECKPOINT_GATEWAY_ENV only.
+- Leave real state alone: jobs started by 0.1 may still run from a real CHECKPOINT_HOME;
+  migration must keep them visible and stoppable, and tests use scratch CHECKPOINT_HOME and
+  CHECKPOINT_GATEWAY_ENV only.
 - Never install into the real Claude config; scratch `CLAUDE_CONFIG_DIR` only.
 - Every behaviour change gets a test; keep the suite hermetic (fake Claude process trees).
 - No git commits, pushes or installs without the user's say-so.

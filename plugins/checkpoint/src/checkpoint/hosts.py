@@ -25,6 +25,7 @@ new machine is still another machine than the one the task's work ran on).
 """
 from __future__ import annotations
 
+import functools
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -49,6 +50,11 @@ NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}")
 # first word after the options.
 _SSH_ARG_OPTS = set("BbcDEeFIiJLlmOoPpQRSWw")
 _REMOTE_TOOLS = ("ssh", "mosh", "scp", "sftp", "rsync")
+# A command can name one only if a tool's name is in it once quotes and
+# backslashes are gone (shlex builds its words from the rest): most commands
+# of a long history are answered without splitting them.
+_REMOTE_HINT = re.compile("|".join(_REMOTE_TOOLS))
+_QUOTING = re.compile(r"[\\'\"]")
 
 
 @dataclass
@@ -84,9 +90,19 @@ def command_hosts(command: str) -> list[str]:
     """Host names a Bash command reaches with ssh/scp/rsync/sftp/mosh (the
     gateway's stand-ins answer to those names): ssh's destination after its
     options, `NAME:` words of the copy tools; `user@` dropped. Candidates
-    only: `used` keeps the ones the gateway lists."""
+    only: `used` keeps the ones the gateway lists. A recovery asks this of
+    every command in the task's history, several times: answered at once
+    when no tool's name is in it, and remembered (_command_hosts)."""
+    command = command or ""
+    if not _REMOTE_HINT.search(_QUOTING.sub("", command)):
+        return []
+    return list(_command_hosts(command))
+
+
+@functools.lru_cache(maxsize=4096)
+def _command_hosts(command: str) -> tuple[str, ...]:
     out: list[str] = []
-    for seg in re.split(r"&&|\|\||[;&|\n(]", command or "")[:40]:
+    for seg in re.split(r"&&|\|\||[;&|\n(]", command)[:40]:
         try:
             words = shlex.split(seg, posix=True)
         except ValueError:
@@ -123,7 +139,7 @@ def command_hosts(command: str) -> list[str]:
             n = safe_name(host)
             if n:
                 out.append(n)
-    return list(dict.fromkeys(out))
+    return tuple(dict.fromkeys(out))
 
 
 GATEWAY_JOB_START = "mcp__plugin_gate_gw__job_start"     # runs its command on its `host` (default localhost)

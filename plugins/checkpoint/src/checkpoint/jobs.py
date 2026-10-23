@@ -5,9 +5,12 @@ writes the exit code to a file. Claude's own run_in_background Bash dies with
 the Claude process (DESIGN.md, Spike 4); these don't.
 
 Registry: <home>/jobs.json (under the state lock); per job <home>/jobs/<id>/
-holding output.log, exit_code and gateway_env (see below), all private
-(0600: exit_code and gateway_env are made empty before the job starts, and
-the job's shell fills them in; an empty exit_code means it hasn't exited).
+holding output.log, exit_code, gateway_env (see below) and log_rotated, all
+private (0600: exit_code, gateway_env and log_rotated are made empty before
+the job starts, and the job's shell fills them in; an empty exit_code means
+it hasn't exited). A log keeps its last state.JOB_LOG_KEEP_BYTES at most
+(the wrapper rotates it into output.log.1); job_status and job_tail say how
+much earlier output was dropped (`log_truncated`).
 The job itself runs with the umask the user's session had. States: running, exited, killed (by
 job_stop), vanished (gone without an exit code), stop_failed (job_stop could
 not end every process of its group). A job counts as running while its
@@ -48,7 +51,12 @@ longer lists is stored as `unknown` (`gone`). `unknown`, gone or not, is
 never done and never stopped: such a job counts as possibly running
 (is_live), is not final (kept out of pruning and of journal retention until
 the gateway says what became of it), and a stop of it says "outcome
-unknown, it may still run" with the reason.
+unknown, it may still run" with the reason. Only the person ends that wait:
+one checkpoint has seen unknown for RELEASE_AFTER_DAYS (`unknown_ts`: the
+first time the gateway couldn't be asked about it, or a snapshot didn't list
+it; cleared whenever the gateway reports on it) can be released (`release`,
+the terminal helper's `forget-job`): `released`, final for checkpoint's
+records, its outcome still unknown.
 """
 from __future__ import annotations
 
@@ -163,7 +171,9 @@ def gateway_env() -> tuple[str, str]:
 
 # The job's shell: $0 checkpoint-job-<id> (so status can tell our process from
 # an unrelated one that reused the pid), $1 the command, $2 the exit-code file,
-# $3 the gateway env file or "", $4 where to write whether it was applied.
+# $3 the gateway env file or "", $4 where to write whether it was applied,
+# $5 the log, $6 its size that starts a rotation, $7 the seconds between looks,
+# $8 the rotation record ("<rotations> <bytes moved aside>").
 # The command runs in a nested sh, so its own `exit` can't skip the exit-code
 # write. The env file is first sourced in a subshell: dash exits on a syntax
 # error, a failing special builtin or a missing file in a sourced file, and
@@ -171,8 +181,31 @@ def gateway_env() -> tuple[str, str]:
 # sources cleanly (no error output, the shell survives) is applied for real;
 # otherwise the job says so in its log and runs without it (fails open, like
 # the rest of checkpoint). The probe's error text follows that line.
+# The log's cap: a watcher in the background (the command itself keeps the
+# foreground and its signals) copies a log past $6 bytes to <log>.1 and empties
+# it (the job writes with O_APPEND, so it goes on at the new end; what it
+# writes between the copy and the emptying is lost). The watcher ends with the
+# command, at a TERM to the group (it ends its sleep too), or once the wrapper
+# is gone.
 WRAPPER = """\
-checkpoint_cmd=$1 checkpoint_exit=$2
+checkpoint_cmd=$1 checkpoint_exit=$2 checkpoint_watch=
+if [ -n "$5" ]; then
+  (
+    trap 'kill $checkpoint_sp 2>/dev/null; exit 0' TERM
+    while :; do
+      sleep "$7" & checkpoint_sp=$!; wait $checkpoint_sp
+      kill -0 $$ 2>/dev/null || exit 0
+      checkpoint_size=$(wc -c < "$5") || continue
+      if [ $((checkpoint_size + 0)) -gt "$6" ] && cp "$5" "$5.1"; then
+        : > "$5"
+        checkpoint_n= checkpoint_b=
+        [ -s "$8" ] && read checkpoint_n checkpoint_b < "$8"
+        echo "$((${checkpoint_n:-0} + 1)) $((${checkpoint_b:-0} + checkpoint_size))" > "$8"
+      fi
+    done
+  ) </dev/null >/dev/null 2>&1 &
+  checkpoint_watch=$!
+fi
 if [ -n "$3" ]; then
   checkpoint_err=$(. "$3" 2>&1 >/dev/null </dev/null; echo checkpoint-ok)
   if [ "$checkpoint_err" = checkpoint-ok ]; then
@@ -185,7 +218,9 @@ if [ -n "$3" ]; then
     [ -z "$checkpoint_err" ] || printf '%s\\n' "$checkpoint_err" >&2
   fi
 fi
-/bin/sh -c "$checkpoint_cmd"; rc=$?; echo $rc > "$checkpoint_exit"; exit $rc
+/bin/sh -c "$checkpoint_cmd"; rc=$?
+[ -z "$checkpoint_watch" ] || kill "$checkpoint_watch" 2>/dev/null
+echo $rc > "$checkpoint_exit"; exit $rc
 """
 
 
@@ -218,10 +253,96 @@ def is_live(rec: dict[str, Any]) -> bool:
 def is_final(rec: dict[str, Any]) -> bool:
     """Certainly ended: the own runner's exited / killed / vanished; a
     gateway job the gateway reported exited, failed or canceled. Never an
-    unknown one."""
+    unknown one. (A `released` one is final for checkpoint's records only:
+    the person released it, `release`; its outcome is still unknown.)"""
     if owner(rec) == "gateway":
-        return rec.get("state") in gateway.FINAL_STATES
+        return rec.get("state") in gateway.FINAL_STATES or rec.get("state") == "released"
     return rec.get("state") in OWN_FINAL
+
+
+# A gateway job checkpoint has seen unknown for this long, with no word from
+# the gateway about it since, can be released by the person (`checkpoint
+# forget-job <id>`; /check:doctor names such jobs). Nothing releases one on
+# its own.
+RELEASE_AFTER_DAYS = 7
+
+
+def unknown_since(rec: dict[str, Any], now: float | None = None) -> float:
+    """Since when checkpoint has seen this job unknown: `unknown_ts`, stored
+    the first time the gateway couldn't be asked about it (refresh_all) or a
+    snapshot didn't list it (_apply_view, note_gateway_states), cleared
+    whenever the gateway reports on it (_apply). Not when checkpoint last
+    asked: a job nobody asked about for a week isn't a week unknown when the
+    gateway is down the next time. A record lost in a restart before
+    unknown_ts existed: its `seen_ts`, set when it was lost. Otherwise now:
+    not unknown long enough for anything yet."""
+    if isinstance(rec.get("unknown_ts"), (int, float)) and rec["unknown_ts"] > 0:
+        return float(rec["unknown_ts"])
+    if rec.get("gone") and isinstance(rec.get("seen_ts"), (int, float)):
+        return float(rec["seen_ts"])
+    return time.time() if now is None else now
+
+
+def releasable(rec: dict[str, Any], now: float | None = None) -> bool:
+    """A gateway job that reads unknown now (refresh_all's view) and that
+    checkpoint has seen unknown for over RELEASE_AFTER_DAYS (unknown_since)."""
+    now = time.time() if now is None else now
+    return is_unknown(rec) and now - unknown_since(rec, now) > RELEASE_AFTER_DAYS * 86400
+
+
+def release(name: str, by: str = "user") -> dict[str, Any]:
+    """`checkpoint forget-job <id>`: stop waiting for the gateway's word on
+    a job stuck unknown (unreachable, or lost in a restart) for more than
+    RELEASE_AFTER_DAYS: its record becomes `released` (final for
+    checkpoint: no longer live, so it pins neither its task's journal nor
+    pruning; aged out like a finished job), its task's journal records
+    `job.released`, and it is said as released with its outcome unknown,
+    never as done or stopped. Refused for any other job (one the gateway
+    reports on, a recent unknown, the own runner's)."""
+    jobs_now = refresh_all()
+    rec = jobs_now.get(name) or next((j for j in jobs_now.values() if name and name in (j.get("gateway_job"),)), None)
+    if rec is None:
+        hits = [j for j in jobs_now.values() if j.get("name") == name]
+        rec = max(hits, key=lambda j: j.get("started_ts", 0)) if len(hits) == 1 else None
+        if len(hits) > 1:
+            return {"ok": False, "reason": f"{len(hits)} jobs are named {name}: say which by its id (`status` lists them)"}
+    if rec is None:
+        return {"ok": False, "reason": f"no job named {name}"}
+    jid = rec["id"]
+    if owner(rec) != "gateway":
+        return {"ok": False, "reason": f"job {jid} runs in checkpoint's own runner, whose state comes from the process "
+                                       "table: nothing to release (`stop` ends it)"}
+    if rec.get("state") == "released":
+        return {"ok": False, "reason": f"job {jid} was released already"}
+    if not is_unknown(rec):
+        return {"ok": False, "reason": f"job {jid} is {rec.get('state')} (the gateway's word): nothing to release"}
+    now = time.time()
+    since = unknown_since(rec, now)
+    age = now - since
+    if age <= RELEASE_AFTER_DAYS * 86400:
+        return {"ok": False, "reason": f"job {jid} is unknown ({rec.get('unknown_why') or 'the gateway can not prove its state'}), "
+                                       f"but checkpoint has seen it unknown for only {age / 86400:.1f} day(s): it can be "
+                                       f"released once that is over {RELEASE_AFTER_DAYS} days"}
+    # What the registry held when refresh_all looked (its view says unknown
+    # for a job it couldn't ask about, with the stored state as last_seen).
+    stored = (rec.get("last_seen") or {}).get("state") if "last_seen" in rec else rec.get("state")
+    with state.lock():
+        reg = _registry()
+        r = reg["jobs"].get(jid)
+        if r is None:
+            return {"ok": False, "reason": f"no job named {name}"}
+        # Again under the lock: anything the gateway said since the look
+        # above (an event, another process's snapshot) wins.
+        if (is_final(r) or r.get("state") != stored or r.get("seen_ts") != rec.get("seen_ts")
+                or unknown_since(r, now) != since):
+            return {"ok": False, "reason": f"job {jid} changed while it was being released (the gateway reported on it "
+                                           f"just now: {r.get('state')}): nothing released; look again (`status`)"}
+        r.update(last_seen={"state": r.get("state"), "at": r.get("seen_ts")}, state="released", released_ts=now,
+                 released_by=by, released_why=rec.get("unknown_why") or "", ended_ts=now,
+                 ended=time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now)))
+        _save(reg)
+    return {"ok": True, "job": public(r), "unknown_days": round(age / 86400, 1), "task_id": r.get("task_id") or "",
+            "session_id": r.get("session_id") or ""}
 
 
 def start(name: str, command: str | None = None, argv: list[str] | None = None,
@@ -266,11 +387,13 @@ def _start_own(name: str, cmdline: str, cwd: str, redo_hint: str, task: str, ses
         use = gwf if gwf and not refused else ""
         # Made here (0600, under our umask 077) so that the job's shell, which
         # runs with the user's umask, writes into private files.
-        for f in [exitf] + ([jdir / "gateway_env"] if use else []):
+        for f in [exitf, jdir / "log_rotated"] + ([jdir / "gateway_env"] if use else []):
             f.write_bytes(b"")
+        keep, every = state.job_log_keep()
         with open(log, "ab") as out:
             proc = subprocess.Popen(["/bin/sh", "-c", WRAPPER, f"checkpoint-job-{jid}",
-                                     cmdline, str(exitf), use, str(jdir / "gateway_env") if use else ""],
+                                     cmdline, str(exitf), use, str(jdir / "gateway_env") if use else "",
+                                     str(log), str(keep // 2), f"{every:g}", str(jdir / "log_rotated")],
                                     cwd=cwd, env=job_env(), stdin=subprocess.DEVNULL, stdout=out,
                                     stderr=subprocess.STDOUT, start_new_session=True,
                                     umask=state.user_umask())
@@ -428,6 +551,7 @@ def note_gateway_states(found: dict[str, dict[str, Any]], epoch: int | None, los
             elif gj in lost:
                 rec.update(state="unknown", gone=True, seen_ts=time.time(), seen_epoch=epoch,
                            unknown_why="the gateway restarted and no longer lists it")
+                rec.setdefault("unknown_ts", rec["seen_ts"])     # first seen unknown (kept if it was before)
                 changed = True
         if changed:
             _save(reg)
@@ -457,6 +581,10 @@ def _apply(rec: dict[str, Any], j: dict[str, Any], epoch: int | None) -> bool:
     rec["seen_ts"] = time.time()
     rec["seen_epoch"] = epoch
     rec.pop("unknown_why", None)
+    if rec.get("state") != "unknown":
+        rec.pop("unknown_ts", None)     # the gateway's word: no longer unknown (an `unknown` it sends keeps it)
+    else:
+        rec.setdefault("unknown_ts", rec["seen_ts"])
     return rec != before
 
 
@@ -487,16 +615,23 @@ def _apply_view(reg: dict[str, Any], listed: dict[str, dict[str, Any]], epoch: i
         if j is not None:
             changed = _apply(rec, j, epoch) or changed
         elif is_unknown(rec) and rec.get("gone"):
-            continue    # already lost (with its reason); unknown until a snapshot lists it again
+            # Already lost (with its reason); unknown until a snapshot lists it
+            # again. (Lost before unknown_ts existed: since it was lost.)
+            if not rec.get("unknown_ts"):
+                rec["unknown_ts"] = unknown_since(rec)
+                changed = True
+            continue
         elif rec.get("seen_epoch") is not None and rec.get("seen_epoch") != epoch:
             rec.update(state="unknown", gone=True, seen_ts=time.time(), seen_epoch=epoch,
                        unknown_why="the gateway restarted and no longer lists it")
+            rec.setdefault("unknown_ts", rec["seen_ts"])
             changed = True
         else:
             # Same epoch, no record of it (kept 24 h there): its outcome can't
             # be read any more; unknown, never done.
             rec.update(state="unknown", gone=True, seen_ts=time.time(),
                        unknown_why="the gateway has no record of it any more")
+            rec.setdefault("unknown_ts", rec["seen_ts"])
             changed = True
     return changed
 
@@ -578,16 +713,56 @@ def _exit_text(exitf: Path) -> str | None:
     return text or None
 
 
+def log_dropped(rec: dict[str, Any]) -> int:
+    """How many bytes of an own-runner job's earliest output its log's cap
+    dropped (the wrapper's rotation record, less what output.log.1 still
+    holds); 0 when nothing was."""
+    log = rec.get("log")
+    if not log or owner(rec) == "gateway":
+        return 0
+    try:
+        moved = int((Path(log).parent / "log_rotated").read_text().split()[1])
+    except (OSError, ValueError, IndexError):
+        return 0
+    try:
+        kept = Path(log + ".1").stat().st_size
+    except OSError:
+        kept = 0
+    return max(0, moved - kept)
+
+
+def _log_tail(log: str, n: int) -> bytes:
+    """The last n bytes of a job's output: output.log, after the end of
+    output.log.1 when the log was rotated a moment ago."""
+    data = b""
+    for p in (log, log + ".1"):
+        try:
+            with open(p, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - (n - len(data))))
+                data = f.read() + data
+        except OSError:
+            pass
+        if len(data) >= n:
+            break
+    return data
+
+
 def public(rec: dict[str, Any]) -> dict[str, Any]:
     out = {k: rec.get(k) for k in ("id", "name", "state", "exit_code", "command", "cwd",
                                    "started", "ended", "task", "redo_hint", "stop_reason",
                                    "log", "gateway_env", "gateway_env_file", "on_cancel", "detached")}
     out["supervisor"] = owner(rec)
     if owner(rec) == "gateway":
-        for k in ("gateway_job", "on_pause", "signal", "host", "unknown_why", "last_seen", "gone"):
+        for k in ("gateway_job", "on_pause", "signal", "host", "unknown_why", "last_seen", "gone", "released_by"):
             out[k] = rec.get(k)
     elif rec.get("why_own"):
         out["why_own"] = rec["why_own"]
+    dropped = log_dropped(rec)
+    if dropped:
+        keep = state.job_log_keep()[0]
+        out["log_truncated"] = (f"its earliest {dropped / 2**20:.1f} MB of output were dropped: a job's log keeps "
+                                f"its last {keep // 2 / 2**20:g}-{keep / 2**20:g} MB (output.log.1, then output.log)")
     if rec.get("started_ts"):
         end = rec.get("ended_ts") or time.time()
         out["runtime_s"] = round(end - rec["started_ts"], 1)
@@ -598,7 +773,8 @@ def refresh_all(gateway_too: bool = True) -> dict[str, dict[str, Any]]:
     """Every job, refreshed: the own runner's from the process table and
     their exit files, the gateway's from one snapshot (when it has live
     ones). A gateway job that can't be asked now reads as unknown (the
-    stored record keeps its last seen state)."""
+    stored record keeps its last seen state, and when this was first seen:
+    `unknown_ts`)."""
     ptable = procs.table()
     listed, epoch, unreachable = _gateway_view(_registry()) if gateway_too else (None, None, "")
     with state.lock():
@@ -614,6 +790,15 @@ def refresh_all(gateway_too: bool = True) -> dict[str, dict[str, Any]]:
             changed = changed or rec != before
         if listed is not None:
             changed = _apply_view(reg, listed, epoch) or changed
+        elif unreachable:
+            now = time.time()
+            for rec in reg["jobs"].values():
+                if (owner(rec) == "gateway" and rec.get("gateway_job") and not is_final(rec)
+                        and not rec.get("unknown_ts")):
+                    # Unknown from now on (the gateway can't be asked about it); one
+                    # lost in a restart before unknown_ts existed: since then.
+                    rec["unknown_ts"] = unknown_since(rec, now)
+                    changed = True
         if changed:
             _save(reg)
     if unreachable:
@@ -671,13 +856,7 @@ def tail(name: str, lines: int = 40, rec: dict[str, Any] | None = None) -> dict[
     lines = max(1, min(int(lines or 40), 500))
     if owner(rec) == "gateway":
         return _tail_gateway(rec, lines)
-    try:
-        with open(rec["log"], "rb") as f:
-            f.seek(0, 2)
-            f.seek(max(0, f.tell() - 200_000))
-            text = f.read().decode("utf8", "replace")
-    except OSError:
-        text = ""
+    text = _log_tail(rec["log"], 200_000).decode("utf8", "replace") if rec.get("log") else ""
     return {"ok": True, "job": public(rec), "tail": "\n".join(text.splitlines()[-lines:])}
 
 
@@ -787,6 +966,11 @@ def _stop_gateway(rec: dict[str, Any], reason: str, grace: float) -> dict[str, A
     reports it still running, or refused the signal) or unknown (the
     gateway can't be reached, lost the job, or can't prove its state)."""
     gj = rec["gateway_job"]
+    if rec.get("state") == "released":
+        # forget-job: final for checkpoint's records, never "not running".
+        return _unknown_stop(rec, f"you released {rec['id']} ({gj}) after it was unknown for days with no word from "
+                                  "the gateway, so checkpoint no longer follows it; if it still runs, stop it with the "
+                                  "gateway's own tools")
     if is_final(rec):
         return {"ok": True, "job": public(rec), "note": "not running", "stopped": True, "outcome": "stopped",
                 "already_ended": True, "supervisor": "gateway"}
@@ -840,9 +1024,10 @@ def _stop_gateway(rec: dict[str, Any], reason: str, grace: float) -> dict[str, A
 
 
 def detach(name: str, reason: str = "") -> dict[str, Any]:
-    """Release a running job from its task (/check:cancel detach): it keeps
+    """Detach a running job from its task (/check:cancel detach): it keeps
     running, is no longer the task's child work, and stays visible and
-    stoppable (job_status, /check:stop)."""
+    stoppable (job_status, /check:stop). (Not `release`: that is the
+    person's forget-job of a job stuck unknown.)"""
     rec = find(name)
     if not rec:
         return {"ok": False, "reason": f"no job named {name}"}
@@ -857,7 +1042,7 @@ def detach(name: str, reason: str = "") -> dict[str, Any]:
     if owner(rec) == "gateway":
         # CONTRACT-v1 has no call to release a job from its task: checkpoint's
         # records do; the gateway keeps running and listing it as it was started.
-        out["note"] = ("released from the task in checkpoint's records; it keeps running in the gateway, which still "
+        out["note"] = ("detached from the task in checkpoint's records; it keeps running in the gateway, which still "
                        "lists it under its old task_ref")
     return out
 

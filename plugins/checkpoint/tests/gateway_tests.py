@@ -554,13 +554,13 @@ check("/check:cancel: each live gateway job follows its policy through the gatew
       and any(r["kind"] == "task.cancel" and {o["supervisor"] for o in r["data"]["jobs"]} == {"gateway"}
               for r in jrecs(TP_)))
 check("...the other session's job is untouched", D1.jobs[GO]["state"] == "running")
-# detach: released in checkpoint's records, left running in the gateway
+# detach: detached in checkpoint's records, left running in the gateway
 SD, PD, TPD, EHD, EMD = gw_session("detach")
 mcall("job_start", {"name": "keepme", "command": "run keep", "cwd": str(PD), "redo_hint": "r", "on_cancel": "detach"},
       EMD, tid="toolu_d_1")
 GK = reg_rec("keepme")["gateway_job"]
 out = hook("UserPromptSubmit", jbase(SD, PD, TPD, prompt="/check:cancel"), EHD)
-check("/check:cancel with a job's on_cancel detach: left running in the gateway, released in checkpoint's records "
+check("/check:cancel with a job's on_cancel detach: left running in the gateway, detached in checkpoint's records "
       "(and said so)", D1.jobs[GK]["state"] == "running" and reg_rec("keepme").get("detached")
       and "the gateway keeps running it" in ctx(out)
       and not [r for r in D1.calls("POST", f"/v1/jobs/{GK}/signal")])

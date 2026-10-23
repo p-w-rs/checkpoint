@@ -15,9 +15,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+from . import sanitize
+
 TAIL_BYTES = 262144  # keep in sync with hooks/fast.sh
 
-COMMAND_RE = re.compile(r"^/check:(pause|resume|status|help|doctor|save|list|diff|cancel|stop|complete|export)"
+COMMAND_RE = re.compile(r"^/check:(pause|resume|status|help|doctor|save|list|diff|cancel|stop|complete|export|forget)"
                         r"(?:\s+(.*))?$", re.S)
 # `pause interrupt` is `pause now` (the in-flight command is stopped at once).
 KEYWORD_RE = re.compile(r"^pause(?:\s+(now|interrupt|all|all\s+now|now\s+all|all\s+interrupt|interrupt\s+all))?[.!]?$",
@@ -192,6 +194,9 @@ def tool_results(lines: list[str]) -> set[str]:
 
 
 def recent_tool_calls(lines: list[str], n: int = 10) -> list[dict[str, Any]]:
+    """The last n tool calls, each its tool and a brief of its input as the
+    journal keeps it (sanitize.tool_input: scrubbed, never file contents or
+    an unknown tool's raw input): checkpoint.json lands in the project."""
     calls: list[dict[str, Any]] = []
     for line in lines:
         if '"tool_use"' not in line:
@@ -204,9 +209,11 @@ def recent_tool_calls(lines: list[str], n: int = 10) -> list[dict[str, Any]]:
             continue
         for part in (rec.get("message") or {}).get("content") or []:
             if isinstance(part, dict) and part.get("type") == "tool_use":
-                inp = part.get("input") or {}
-                brief = (inp.get("command") or inp.get("file_path") or inp.get("pattern")
-                         or inp.get("description") or json.dumps(inp)[:120])
-                calls.append({"tool": part.get("name"), "input": str(brief)[:200],
+                tool = str(part.get("name") or "")
+                inp = sanitize.tool_input(tool, part.get("input") or {})
+                brief = next((inp[k] for k in ("command", "file_path", "notebook_path", "path", "pattern", "url",
+                                               "query", "description", "subject", "skill", "summary")
+                              if isinstance(inp.get(k), str) and inp[k]), "")
+                calls.append({"tool": sanitize.clip(tool, 120), "input": sanitize.clip(brief, 200),
                               "at": rec.get("timestamp")})
     return calls[-n:]

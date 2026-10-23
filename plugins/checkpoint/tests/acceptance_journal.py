@@ -9,11 +9,16 @@ session gets a goal, records a constraint (checkpoint_note), creates and
 updates task steps (TaskCreate/TaskUpdate), edits a file, runs a test
 command, starts a subagent, and runs two long commands (one the subagent's);
 /check-save is typed while they run; then the claude process is killed with
-SIGKILL. A new session on the same config (same CHECKPOINT_HOME) must offer
-the task as interrupted, and its recovery summary (/check:resume last, then
-`claude --resume <old session>`) must hold the goal, the constraint, the
-progress, the file with its hash, the validation result with the version it
-ran against, the subagent, and the in-flight operations as outcome unknown.
+SIGKILL. A new session on the same config (same CHECKPOINT_HOME) must show
+the person the crash notice on screen (0.8.0: the task, its goal, `claude
+--resume <old session>` and `/check:resume <task>`), offer the task as
+interrupted, and its recovery summary (/check:resume last, then `claude
+--resume <old session>`, where no crash notice shows) must hold the goal, the
+constraint, the progress, the file with its hash, the validation result with
+the version it ran against, the subagent, and the in-flight operations as
+outcome unknown. Then (0.8.0) the task is finished with /check:complete;
+/check:forget of it is refused while one of its sessions runs, and in a new
+session (no crash notice for a finished task) it removes the task's journal.
 
 The plugin is loaded from a copy (--plugin-dir; Claude Code writes types
 into a mod folder it loads), or with --installed from a normal installation
@@ -74,6 +79,23 @@ def wait_main(s: Session, n: int, timeout: float) -> bool:
     """At least n main-loop requests, pumping the pty meanwhile (never FakeAPI.wait_main, which only
     sleeps: Claude Code then blocks writing to its terminal; acceptance_recovery.wait_main)."""
     return bool(wait(s, lambda: len(s.api.main_requests()) >= n, timeout, 0.05))
+
+
+def has(s: Session, needle: str) -> bool:
+    """Whether the screen history holds `needle`, ignoring all whitespace (the terminal wraps long rows
+    mid-word; acceptance_recovery.has)."""
+    return re.sub(r"\s+", "", needle) in re.sub(r"\s+", "", s.all_text())
+
+
+def submit_for_request(s: Session, text: str, timeout: float = 60) -> str:
+    """Submit `text` and return the text of the main-loop request it led to ('' if none came): a
+    /check:* skill's hook result (<checkpoint-result>) reaches the model there, while the screen shows
+    only the scripted reply."""
+    n0 = len(s.api.main_requests())
+    s.submit(text)
+    if not wait_main(s, n0 + 1, timeout):
+        return ""
+    return request_text(s.api.main_requests()[-1])
 
 
 def running(marker: str) -> bool:
@@ -191,6 +213,15 @@ def main() -> int:
                      config_dir=cfg, permission_mode="bypassPermissions", extra_env=env, debug_file=True)
         try:
             s2.wait_ready(timeout=90)
+            # 0.8.0: the crash notice, for the person (the SessionStart context reaches only the model): the
+            # killed task, its goal (clipped at 60 characters), and both ways to continue it, on screen.
+            notice = bool(task) and wait(s2, lambda: has(s2, f"checkpoint: task {task} was interrupted"), 30)
+            check("the new session shows the crash notice on screen: the killed task, its goal, `claude --resume "
+                  "<killed session>` and `/check:resume <task>`",
+                  notice and has(s2, '("Build the widget so widget() returns')
+                  and has(s2, f"claude --resume {old_sid}") and has(s2, f"/check:resume {task} picks it up here"))
+            if not notice:
+                print("       (screen: " + re.sub(r"\s+", " ", s2.all_text())[-1500:] + ")")
             s2.submit("/check:resume last")
             got = wait_main(s2, 1, 60)
             reqs = s2.api.main_requests()
@@ -222,7 +253,7 @@ def main() -> int:
             s2.close()
 
         print("session 3: claude --resume <the killed session>", flush=True)
-        s3 = Session(root / "s3", proj, plugin_dirs=pdirs, replies=["ok"] * 3, config_dir=cfg,
+        s3 = Session(root / "s3", proj, plugin_dirs=pdirs, replies=["ok"] * 6, config_dir=cfg,
                      permission_mode="bypassPermissions", extra_env=env, args=["--resume", old_sid])
         try:
             s3.wait_ready(timeout=90)
@@ -233,8 +264,45 @@ def main() -> int:
             check("resuming the killed session brings its recovery summary in at the start (<checkpoint-recovery>)",
                   "<checkpoint-recovery>" in txt and "Build the widget so widget() returns 2" in txt
                   and "outcome unknown" in txt)
+            # The notice is for fresh starts (startup, /clear), never for the session being resumed.
+            check("...and no crash notice on screen when the killed session itself is resumed",
+                  not has(s3, "was interrupted"))
+            # 0.8.0: /check:forget. First the task is finished (/check:complete), then forgetting it is
+            # refused while one of its sessions (this one) runs: nothing removed.
+            rq = submit_for_request(s3, "/check:complete")
+            check("/check:complete marks the task complete (the hook's result reaches the model)",
+                  bool(task) and f"Task {task} marked complete" in rq)
+            rq = submit_for_request(s3, f"/check:forget {task}")
+            check("/check:forget <task> while one of its sessions runs (this one): refused, nothing removed",
+                  bool(task) and "Not forgotten" in rq and "runs (this one)" in rq and "Nothing was removed" in rq
+                  and (home / "journal" / task).is_dir())
         finally:
             s3.close()
+
+        print("session 4: a new session forgets the finished task", flush=True)
+        s4 = Session(root / "s4", proj, plugin_dirs=pdirs, replies=["ok"] * 4, config_dir=cfg,
+                     permission_mode="bypassPermissions", extra_env=env, debug_file=True)
+        try:
+            s4.wait_ready(timeout=90)
+            mine = [r for r in journal_records(home) if r.get("task") == task]
+            n_recs, n_cp = len(mine), sum(1 for r in mine if r.get("kind") == "checkpoint")
+            rq = submit_for_request(s4, f"/check:forget {task}")
+            # (the first request carries the SessionStart context, so the start's hooks, the notice's
+            # included, had answered by then)
+            check("a fresh session after /check:complete: no crash notice for the finished task",
+                  bool(task) and "This session's id:" in rq and not has(s4, f"checkpoint: task {task} was interrupted"))
+            summary["forget_result"] = (rq[rq.find("Forgot task"):][:400] if "Forgot task" in rq else rq[-400:])
+            check("/check:forget <the finished task> from another session: it says it removed the task's journal "
+                  "(exactly the records and checkpoints it held)",
+                  bool(task) and f"Forgot task {task}" in rq and "removed its journal" in rq
+                  and f"({n_recs} record(s), {n_cp} checkpoint(s))" in rq)
+            check("...its journal folder is gone and no record of it is left in any journal",
+                  bool(task) and not (home / "journal" / task).exists()
+                  and not any(r.get("task") == task for r in journal_records(home)))
+            check("...the files in the project are untouched (widget.py as the task left it)",
+                  (proj / "widget.py").read_text() == "def widget():\n    return 2\n")
+        finally:
+            s4.close()
         summary["seconds"] = round(time.time() - t0, 1)
     finally:
         kill_marked("deploy-wait-")

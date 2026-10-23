@@ -70,6 +70,11 @@ KILL_GRACE_SECONDS = 3.0     # `pause now`: SIGTERM, then SIGKILL after this
 JOB_STOP_GRACE_SECONDS = 5.0
 SESSION_RETENTION_DAYS = 7   # dead, un-paused session records older than this are pruned
 JOB_RETENTION_DAYS = 14      # finished jobs (record and log) older than this are pruned
+# An own-runner job's log keeps its last JOB_LOG_KEEP_BYTES at most: past half
+# of it, output.log is copied to output.log.1 (the older copy goes) and
+# emptied, looked at every JOB_LOG_CHECK_SECONDS by the job's wrapper.
+JOB_LOG_KEEP_BYTES = 64 << 20
+JOB_LOG_CHECK_SECONDS = 10
 # A queued pause command applied early is matched with its echo (the same
 # command run when the turn ends) for at most this long, and only when the
 # transcript can't say whether the echo already came.
@@ -106,7 +111,7 @@ NON_USER_PROMPT_PREFIXES = (
 # this many days ago (finished: marked complete or canceled; open: the
 # rest), never while one of its sessions is alive or paused or one of its
 # jobs runs. Environment variables (no settings file: invariant 7), 0 keeps
-# them forever. README "Data, retention and backup".
+# them forever. README "Your data".
 JOURNAL_KEEP_DAYS = 30
 JOURNAL_KEEP_OPEN_DAYS = 180
 
@@ -131,6 +136,20 @@ def journal_keep_open_days() -> int:
     return _days("CHECKPOINT_KEEP_OPEN_DAYS", JOURNAL_KEEP_OPEN_DAYS)
 
 
+def job_log_keep() -> tuple[int, float]:
+    """(bytes a job's log keeps, seconds between looks); tests make both
+    small (CHECKPOINT_JOB_LOG_KEEP, CHECKPOINT_JOB_LOG_CHECK)."""
+    try:
+        keep = max(1024, int(os.environ.get("CHECKPOINT_JOB_LOG_KEEP") or JOB_LOG_KEEP_BYTES))
+    except ValueError:
+        keep = JOB_LOG_KEEP_BYTES
+    try:
+        every = max(0.2, float(os.environ.get("CHECKPOINT_JOB_LOG_CHECK") or JOB_LOG_CHECK_SECONDS))
+    except ValueError:
+        every = float(JOB_LOG_CHECK_SECONDS)
+    return keep, every
+
+
 def nudge_every() -> int:
     """Tracker reminder every N tool calls. hooks/fast.sh reads the same
     variable with the same default, so the two always agree."""
@@ -138,6 +157,14 @@ def nudge_every() -> int:
         return max(1, int(os.environ.get("CHECKPOINT_NUDGE_EVERY") or 25))
     except ValueError:
         return 25
+
+
+def trackers_on() -> bool:
+    """CHECKPOINT_TRACKERS=off (or 0, no, false): no tracker session note,
+    no reminders to keep one, no Stop block for one. The journal records
+    everything either way. Python only (the hooks' shell half doesn't read
+    it: its every-N call to Python also ingests the spool)."""
+    return (os.environ.get("CHECKPOINT_TRACKERS") or "").strip().lower() not in ("off", "0", "no", "false")
 
 
 def work_dir_name() -> str:
@@ -709,6 +736,9 @@ def prune(force: bool = False) -> dict[str, int]:
         remove(p("spool-errors", name + ".last"))
         for d in ("spool-errors", "journal-errors"):
             remove(reserve_path(d, name))
+        # The gateway's event cursor and pause/resume lock (gateway.cursor_path, core._gw_lock).
+        remove(p("gateway", name + ".json"))
+        remove(p("gateway", name + ".lock"))
         _prune_spool(name)
         remove(p("checkpoints", name + ".json"))
         remove(f)

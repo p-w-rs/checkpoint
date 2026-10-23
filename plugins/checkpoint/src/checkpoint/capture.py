@@ -4,12 +4,27 @@ The every-call path stays without Python: hooks/fast.sh (and the mod, through
 `env.sh spool`) put each event's payload in the session's spool
 (hooks/lib.sh ck_spool):
 
-    spool/<session>/<pid>.ev        one payload (as Claude Code sent it, cut at SPOOL_MAX)
+    spool/<session>/<pid>.ev        one payload (as Claude Code sent it, cut at SPOOL_MAX; while no
+                                    runtime is there or on its way, only what it says about itself:
+                                    `checkpoint_meta`, meta=1)
     spool/<session>/index           one line per payload, appended in one write:
-                                    1 TAB EVENT TAB FILE TAB BYTES [TAB h=HASH] [TAB cut=BYTES]
+                                    1 TAB EVENT TAB FILE TAB BYTES [TAB h=HASH] [TAB cut=BYTES] [TAB meta=1]
     spool/<session>/index.<n>       an index rotated away, kept until nothing more can land in it
-    spool/<session>/cursor          how far the index files were ingested
+    spool/<session>/index.s<n>      one the shell rotated away at a trim while no runtime was there (read
+                                    before the current index; `.trimdone`: the highest one the trim finished)
+    spool/<session>/cursor          how far the index files were ingested (and the inode of the index
+                                    file its offset is in)
+    spool/<session>/.size           "<records> <bytes>" the shell keeps for its cap (written here after
+                                    each ingest: what is left)
     spool/<session>/.lock           one ingester per spool at a time
+
+The shell caps each spool (SPOOL_KEEP_COUNT records, SPOOL_KEEP_BYTES): past
+either it drops the oldest payloads, after a recording.gap record that names
+them; their index lines then point at nothing, and they are counted, not
+reported as problems. While no runtime is there it also moves the index to
+index.s<n> at each trim (nothing else would rotate it), and those are read
+here before the current index. It also removes, at a session start, spools nothing was
+written to for SPOOL_KEEP_DAYS whose session is gone.
 
 Python ingests it at the moments it runs anyway: SessionStart, Stop and
 SessionEnd, PreCompact/PostCompact, the every-N PostToolUse, a pause, the
@@ -46,6 +61,9 @@ from . import authz, journal, sanitize, state
 
 SPOOL_MAX = 262144          # hooks/lib.sh CK_SPOOL_MAX
 HASH_MAX = 16 * 1024 * 1024  # hooks/lib.sh CK_HASH_MAX
+SPOOL_KEEP_COUNT = 10000     # hooks/lib.sh CK_SPOOL_KEEP_COUNT: records a session's spool holds at most
+SPOOL_KEEP_BYTES = 50 << 20  # hooks/lib.sh CK_SPOOL_KEEP_BYTES: and stored bytes
+SPOOL_KEEP_DAYS = 7          # hooks/lib.sh CK_SPOOL_KEEP_DAYS: a dead session's quiet spool is removed then
 INDEX_ROTATE = 256 * 1024   # the index is rotated once fully ingested past this size
 ROTATED_KEEP_SECONDS = 30   # a rotated index is dropped once quiet this long and ingested
 ORPHAN_AGE_SECONDS = 60     # a payload whose index line never came (its hook died)
@@ -100,6 +118,8 @@ class Event:
     extras: dict[str, str] = field(default_factory=dict)   # the index line's other KEY=VALUE fields
     orphan: bool = False
     src: str = ""
+    meta: str = ""           # the shell kept only what the payload says about itself: why (no runtime ...)
+    dropped: tuple[int, int] | None = None   # a recording.gap of dropped payloads: (events, bytes) found gone
 
     def get(self, key: str, default: Any = None) -> Any:
         if self.payload is not None:
@@ -139,10 +159,13 @@ def _spool_lock(d: Path) -> Iterator[None]:
         os.close(fd)
 
 
-def _read_lines(path: Path, offset: int) -> tuple[list[tuple[int, str]], int]:
-    """Complete lines of an index file from `offset`: [(offset, line)], end."""
+def _read_lines(path: Path, offset: int, info: dict[str, int] | None = None) -> tuple[list[tuple[int, str]], int]:
+    """Complete lines of an index file from `offset`: [(offset, line)], end.
+    `info` gets the inode of the file read ("ino")."""
     try:
         with open(path, "rb") as f:
+            if info is not None:
+                info["ino"] = os.fstat(f.fileno()).st_ino
             f.seek(offset)
             data = f.read()
     except OSError:
@@ -158,8 +181,11 @@ def _read_lines(path: Path, offset: int) -> tuple[list[tuple[int, str]], int]:
     return out, offset + pos
 
 
-def _load_event(d: Path, line: str, src: str) -> tuple[Event | None, str, str]:
-    """(event, payload file name, problem) for one index line."""
+def _load_event(d: Path, line: str, src: str,
+                missing: dict[str, tuple[str, int]] | None = None) -> tuple[Event | None, str, str]:
+    """(event, payload file name, problem) for one index line. A payload
+    that is gone goes to `missing` (name: (problem, bytes)) instead: the
+    shell may have dropped it (a recording.gap in the same ingest says)."""
     parts = line.split("\t")
     if len(parts) < 4 or parts[0] != "1":
         return None, "", f"unreadable spool line at {src}"
@@ -172,7 +198,11 @@ def _load_event(d: Path, line: str, src: str) -> tuple[Event | None, str, str]:
         st = path.stat()
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return None, name, f"payload {name} named at {src} is missing"
+        prob = f"payload {name} named at {src} is missing"
+        if missing is None:
+            return None, name, prob
+        missing[name] = (prob, int(nbytes) if nbytes.isdigit() else 0)
+        return None, name, ""
     try:
         n = int(nbytes)
     except ValueError:
@@ -186,8 +216,14 @@ def _load_event(d: Path, line: str, src: str) -> tuple[Event | None, str, str]:
                 payload = None
         except ValueError:
             payload = None
+    meta = ""
+    if payload is not None and isinstance(payload.get("checkpoint_meta"), dict):
+        meta = sanitize.clip(str(payload["checkpoint_meta"].get("why") or "no runtime"), 120)
+    elif "meta" in extras:
+        meta = "no runtime"
     e = Event(event=ev, payload=payload, ts=st.st_mtime, name=name, raw="" if payload is not None else text,
-              nbytes=n, cut=cut or payload is None, hash=extras.get("h", ""), extras=extras, src=src)
+              nbytes=n, cut=(cut or payload is None) and not meta, hash=extras.get("h", ""), extras=extras, src=src,
+              meta=meta)
     return e, name, ("" if payload is not None or cut else f"payload {name} at {src} isn't whole JSON")
 
 
@@ -528,6 +564,10 @@ def records_for(e: Event, sid: str) -> list[dict[str, Any]]:
     note: dict[str, Any] = {}
     if e.cut:
         note["payload_cut"] = e.nbytes
+    if e.meta:
+        # The shell kept the event, the tool, the ids and the size only (no
+        # runtime then): nothing of the input, the result or the text.
+        note["payload_dropped"] = e.nbytes
     if e.orphan:
         note["orphan"] = True
     ev = e.event
@@ -559,7 +599,9 @@ def records_for(e: Event, sid: str) -> list[dict[str, Any]]:
         inp = e.payload.get("tool_input") if e.payload is not None else None
         cwd = e.get("cwd") or ""
         data: dict[str, Any] = {"tool": sanitize.clip(tool, 120), **note}
-        if e.payload is not None:
+        if e.meta:
+            data["input"] = {}
+        elif e.payload is not None:
             data["input"] = sanitize.tool_input(tool, inp)
         else:  # cut: what the prefix still says
             data["input"] = {k: sanitize.clip(sanitize.scrub(v), 500) for k in ("file_path", "notebook_path",
@@ -596,7 +638,7 @@ def records_for(e: Event, sid: str) -> list[dict[str, Any]]:
             mode = e.get("permission_mode")
             if isinstance(mode, str) and mode in authz.MODES:
                 data["mode"] = mode
-            if e.payload is not None:
+            if e.payload is not None and not e.meta:
                 data["input_sha"] = input_sha(data["input"])
             return [dict(base, kind="tool.intent", op=op, data=data)]
         if ev == "PermissionDenied":
@@ -604,7 +646,13 @@ def records_for(e: Event, sid: str) -> list[dict[str, Any]]:
             return [dict(base, kind="tool.outcome", op=op, data=data)]
         if ev == "PostToolUse":
             resp = e.payload.get("tool_response") if e.payload is not None else None
-            if e.payload is not None:
+            if e.meta:
+                # It returned, but without its result nobody knows whether
+                # its work went on in the background: a start, never done.
+                # (A Bash one is read as returned, its result unkept, never
+                # as an unknown outcome: recovery.returned_unrecorded.)
+                bg = "unknown" if tool in ("Bash", "Agent", "Task") else ""
+            elif e.payload is not None:
                 data["result"] = sanitize.tool_response(tool, resp, output=bool(vk))
                 bg = sanitize.background_of(tool, resp, inp)
             else:  # cut: only what the prefix still says
@@ -631,7 +679,21 @@ def records_for(e: Event, sid: str) -> list[dict[str, Any]]:
         else:
             err = e.get("error") or ""
             data["ok"] = False
-            data["error"] = sanitize.tail(sanitize.scrub(err), 500)
+            if tool == "Bash" and not vk:
+                # Claude Code's error is "Exit code N" and then the output so
+                # far: a command that isn't a test, build or check keeps its
+                # first line (the exit code, an interrupt) and the size only.
+                mark = sanitize.failure_mark(err)
+                if mark:
+                    data["error"] = mark
+                if err:
+                    data["error_chars"] = len(err)
+            elif tool == "Bash":
+                data["error"] = sanitize.tail(sanitize.scrub(err), 500)   # a validation's evidence
+            else:
+                # Another tool's reason, without what follows it (Edit's
+                # string, an MCP server's dump).
+                data["error"] = sanitize.clip(sanitize.scrub(err.split("\n", 1)[0]), 200)
             ex = _parse_exit(err)
             if ex is not None:
                 data["exit"] = ex
@@ -715,6 +777,15 @@ def records_for(e: Event, sid: str) -> list[dict[str, Any]]:
         data = authz.check_record(p) if ev == "mod.tool.check" else authz.answer_record(p)
         data.update(tool=sanitize.clip(e.get("tool") or "?", 120), tool_use_id=tid)
         return [dict(base, kind="auth.ref", op=f"auth:{tid}:{data['via']}", data=data)]
+    if ev == "recording.gap" and e.get("what") == "dropped":
+        # hooks/lib.sh ck_spool_trim: the spool passed its cap and the shell
+        # dropped its oldest payloads (the ones this ingest found gone).
+        if not e.dropped or not e.dropped[0]:
+            return []
+        return [dict(base, kind="recording.gap", op=_op(e, "gap"),
+                     data={"what": "dropped", "events": e.dropped[0], "bytes": e.dropped[1],
+                           "at": sanitize.clip(str(e.get("at") or ""), 40),
+                           "why": sanitize.clip(sanitize.scrub(str(e.get("why") or "")), 200)})]
     if ev == "recording.gap":
         # hooks/lib.sh ck_spool_recovered: the hooks couldn't spool from
         # `failed` ("<time> <why>") until `recovered`; that window's events are
@@ -791,7 +862,9 @@ def _say_failure(sid: str, task: str, err: BaseException) -> bool:
 def ingest(sid: str, sync: bool = False, extra: list[dict[str, Any]] | None = None) -> IngestResult:
     """Move the session's spool into its task's journal; `extra` records
     (Python's own: a pause, a note, a checkpoint) are appended after it in
-    the same write. With sync, fsync before returning."""
+    the same write. With sync, fsync before returning; spool payloads are
+    deleted only after a sync either way (they are the records' only other
+    copy)."""
     res = IngestResult(sid)
     if not sid:
         return res
@@ -813,16 +886,35 @@ def _ingest_locked(sid: str, d: Path, sync: bool, extra: list[dict[str, Any]], r
     offset = int(cursor.get("offset") or 0)
     rotated = {str(k): int(v) for k, v in (cursor.get("rotated") or {}).items()} if isinstance(
         cursor.get("rotated"), dict) else {}
+    cur_ino = cursor.get("ino") if isinstance(cursor.get("ino"), int) else 0
+    # Indexes the shell rotated away (index.s<n>: hooks/lib.sh ck_spool_trim,
+    # while no runtime was there) that the cursor doesn't know yet: read from
+    # the start, or from the cursor's offset when one is the index the cursor
+    # was in (the same inode); the current index is then a new one.
+    index = d / "index"
+    for p in sorted(d.glob("index.s*")) if d.is_dir() else []:
+        g = p.name[len("index."):]
+        if g in rotated:
+            continue
+        try:
+            ino = p.stat().st_ino
+        except OSError:
+            continue
+        if cur_ino and ino == cur_ino:
+            rotated[g], offset = offset, 0
+        else:
+            rotated[g] = 0
     events: list[Event] = []
     names: list[str] = []
     seen: set[str] = set()
+    missing: dict[str, tuple[str, int]] = {}
     new_rot: dict[str, int] = {}
-    # Rotated indexes first (older), then the current one.
-    for g in sorted(rotated, key=lambda x: int(x) if x.isdigit() else 0):
+    # Rotated indexes first (older: Python's own, then the shell's), then the current one.
+    for g in sorted(rotated, key=lambda x: (0, int(x), "") if x.isdigit() else (1, 0, x)):
         p = d / f"index.{g}"
         lines, end = _read_lines(p, rotated[g])
         for off, line in lines:
-            e, name, prob = _load_event(d, line, f"index.{g}:{off}")
+            e, name, prob = _load_event(d, line, f"index.{g}:{off}", missing)
             if name:
                 names.append(name)
                 seen.add(name)
@@ -831,17 +923,20 @@ def _ingest_locked(sid: str, d: Path, sync: bool, extra: list[dict[str, Any]], r
             if e:
                 events.append(e)
         new_rot[g] = end
-    index = d / "index"
     try:
-        size = index.stat().st_size
+        ist = index.stat()
+        size, ino = ist.st_size, ist.st_ino
     except OSError:
-        size = 0
+        size = ino = 0
+    if cur_ino and ino and ino != cur_ino:
+        offset = 0      # not the index the cursor was in (that one was rotated away)
     if size < offset:
         res.problems.append(f"spool index shorter than its cursor ({size} < {offset}); read from the start")
         offset = 0
-    lines, end = _read_lines(index, offset)
+    info: dict[str, int] = {}
+    lines, end = _read_lines(index, offset, info)
     for off, line in lines:
-        e, name, prob = _load_event(d, line, f"index:{off}")
+        e, name, prob = _load_event(d, line, f"index:{off}", missing)
         if name:
             names.append(name)
             seen.add(name)
@@ -849,13 +944,23 @@ def _ingest_locked(sid: str, d: Path, sync: bool, extra: list[dict[str, Any]], r
             res.problems.append(prob)
         if e:
             events.append(e)
+    # Payloads the shell dropped over its cap (its recording.gap names them)
+    # are counted there; any other missing one is a problem.
+    dropped: set[str] = set()
+    for e in events:
+        files = (e.payload or {}).get("files") if e.event == "recording.gap" else None
+        if isinstance(files, list) and (e.payload or {}).get("what") == "dropped":
+            gone = [f for f in files if isinstance(f, str) and f in missing]
+            e.dropped = (len(gone), sum(missing[f][1] for f in gone))
+            dropped.update(gone)
+    res.problems.extend(prob for name, (prob, _n) in missing.items() if name not in dropped)
     orphans = _orphans(d, seen) if d.is_dir() else []
     events.extend(orphans)
     names.extend(e.name for e in orphans)
     res.events = len(events)
     if not events and not extra:
         res.task = state.load_session(sid).get("task_id") or ""
-        _tidy(d, index, end, new_rot, rotated)
+        _tidy(d, index, end, new_rot, rotated, info.get("ino", 0))
         if sync and res.task and journal.jdir(res.task).is_dir():
             try:  # nothing new, but what was written unsynced goes to disk now
                 journal.append(res.task, [], sync=True)
@@ -877,11 +982,21 @@ def _ingest_locked(sid: str, d: Path, sync: bool, extra: list[dict[str, Any]], r
     if res.problems:
         recs.append({"kind": "spool.problem", "session": sid,
                      "data": {"problems": [sanitize.clip(p, 200) for p in res.problems[:20]]}})
+    metas = [e for e in events if e.meta]
+    if metas:
+        # One gap for the events the shell kept without their contents (no
+        # runtime then): what they did is not in the journal beyond their names.
+        recs.append({"kind": "recording.gap", "op": f"gap:meta:{metas[0].name}:{len(metas)}", "session": sid,
+                     "data": {"what": "payloads", "events": len(metas), "from_ts": metas[0].ts,
+                              "until_ts": metas[-1].ts, "why": metas[0].meta}})
     recs.extend(extra)
     task = task or task_of(sid)
     res.task = task
     try:
-        task, written = _append(sid, task, recs, sync)
+        # The payloads are deleted below: their records must be on disk
+        # first (synced, F_FULLFSYNC on macOS), or a power loss after the
+        # unlink reached the disk could lose both (one sync per ingest).
+        task, written = _append(sid, task, recs, sync or bool(names))
     except journal.JournalError as e:
         res.task = task
         res.error = str(e)
@@ -892,17 +1007,36 @@ def _ingest_locked(sid: str, d: Path, sync: bool, extra: list[dict[str, Any]], r
     res.last_seq = written[-1]["seq"] if written else 0
     journal.clear_failure(sid)
     _update_meta(task, sid, written)
-    # Only now: the payloads are in the journal.
+    # Only now: the payloads are in the journal, on disk.
     for n in names:
         with contextlib.suppress(OSError):
             (d / n).unlink()
-    _tidy(d, index, end, new_rot, rotated)
+    _tidy(d, index, end, new_rot, rotated, info.get("ino", 0))
+    _write_size(d)
     return res
 
 
-def _tidy(d: Path, index: Path, end: int, new_rot: dict[str, int], rotated: dict[str, int]) -> None:
+def _write_size(d: Path) -> None:
+    """spool/<session>/.size for the shell's cap: the payloads left (records
+    and bytes; hooks/lib.sh ck_spool adds to it, ck_spool_trim reads it)."""
+    n = size = 0
+    try:
+        for p in d.iterdir():
+            if p.name.endswith(".ev"):
+                with contextlib.suppress(OSError):
+                    size += p.stat().st_size
+                    n += 1
+    except OSError:
+        return
+    with contextlib.suppress(OSError):
+        state.touch(d / ".size", f"{n} {size}\n")
+
+
+def _tidy(d: Path, index: Path, end: int, new_rot: dict[str, int], rotated: dict[str, int], ino: int = 0) -> None:
     """Keep the spool bounded: drop rotated indexes that are ingested and quiet,
-    rotate the index once it is ingested past INDEX_ROTATE, store the cursor."""
+    rotate the index once it is ingested past INDEX_ROTATE, store the cursor
+    (with the inode of the index file it was read in: the shell may rotate
+    that file away before the next ingest)."""
     if not d.is_dir():
         return
     rot_out: dict[str, int] = {}
@@ -923,9 +1057,9 @@ def _tidy(d: Path, index: Path, end: int, new_rot: dict[str, int], rotated: dict
         with contextlib.suppress(OSError):
             os.replace(index, d / f"index.{g}")
             rot_out[g] = end
-            end = 0
+            end, ino = 0, 0
     with contextlib.suppress(OSError):
-        state.write_json(d / "cursor", {"offset": end, "rotated": rot_out})
+        state.write_json(d / "cursor", {"offset": end, "rotated": rot_out, **({"ino": ino} if ino and end else {})})
 
 
 def _size(p: Path) -> int:

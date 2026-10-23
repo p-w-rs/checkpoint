@@ -64,14 +64,20 @@ def _cmd(data: dict[str, Any], n: int = 120) -> str:
 
 def _ext(tool: str, data: dict[str, Any]) -> str:
     """'' or the kind of effect outside the repository a call may have had
-    (recovery.external_effect)."""
+    (recovery.effect_of: "unrecorded" for a command spooled while no runtime
+    was there, which may have been anything)."""
     from . import recovery  # recovery imports this module
-    return recovery.external_effect(tool, data.get("input") or {})
+    return recovery.effect_of(tool, data)
 
 
 def _cmdq(data: dict[str, Any], n: int = 120) -> str:
-    """' `<what it did>`' for a line, or '' when there is nothing to show."""
+    """' `<what it did>`' for a line, or '' when there is nothing to show
+    (' command not recorded (no runtime then)' for a command never recorded)."""
     c = _cmd(data, n)
+    if not c:
+        from . import recovery
+        if recovery.unrecorded(str(data.get("tool") or ""), data):
+            return f" {recovery.UNRECORDED}"
     return f" `{c}`" if c else ""
 
 
@@ -82,6 +88,8 @@ _BG_TEXT = {"background": "started in the background",
             "deliver_message": "moved to the background so a message could reach the model",
             "timeout": "moved to the background at its timeout",
             "async_launched": "started in the background (an async subagent)",
+            "unknown": "returned, but its result wasn't kept (no runtime then), so whether it finished or went on "
+                       "in the background isn't known",
             "remote_launched": "started remotely (a cloud agent)",
             "teammate_spawned": "started as a teammate"}
 
@@ -175,6 +183,7 @@ class TaskState:
     # jobs (job.started: which supervisor, the gateway's job id) and what the
     # gateway reported (CONTRACT-v1: snapshots, events, pause/resume outcomes)
     jobs: list[dict[str, Any]] = field(default_factory=list)
+    released: dict[str, dict[str, Any]] = field(default_factory=dict)   # job id -> job.released (forget-job)
     gw_events: list[dict[str, Any]] = field(default_factory=list)
     gw_snapshots: list[dict[str, Any]] = field(default_factory=list)
     gw_marks: list[dict[str, Any]] = field(default_factory=list)   # gateway.pause/resume/epoch/unavailable
@@ -265,6 +274,8 @@ def collect(task: str, view: journal.View | None = None) -> TaskState:
             st.kills[op] = r
         elif k == "job.started":
             st.jobs.append(r)
+        elif k == "job.released":
+            st.released[str((r.get("data") or {}).get("job") or "")] = r
         elif k == "gateway.event":
             st.gw_events.append(r)
         elif k == "gateway.snapshot":
@@ -441,6 +452,19 @@ def build(task: str, limit: int = LIMIT, cwd: str = "", view: journal.View | Non
         lines.append(f"Paused at {_clock(st.pauses[-1]['ts'])} (observed, seq {st.pauses[-1]['seq']}).")
     for gp in st.gaps[-3:]:
         gd = gp.get("data") or {}
+        if gd.get("what") == "payloads":
+            # hooks/lib.sh ck_body: no runtime then, the shell kept names and sizes only.
+            lines.append(f"Recording gap: {gd.get('events')} event(s) from {_clock(gd.get('from_ts'))} to "
+                         f"{_clock(gd.get('until_ts'))} were kept without their contents ({_t(gd.get('why'), 80)}): "
+                         "which tools ran is known, not their input, results or outcome details (observed, seq "
+                         f"{gp['seq']}).")
+            continue
+        if gd.get("what") == "dropped":
+            # hooks/lib.sh ck_spool_trim: the spool passed its cap.
+            lines.append(f"Recording gap: {gd.get('events')} event(s) waiting in the spool were dropped unrecorded "
+                         f"at {_t(gd.get('at'), 40) or '?'} ({_t(gd.get('why'), 100)}); what they did is missing from "
+                         f"this journal (observed, seq {gp['seq']}).")
+            continue
         since, _, why = str(gd.get("failed") or "?").partition(" ")
         lines.append(f"Recording gap: the hooks couldn't record events from {since} until "
                      f"{gd.get('recovered') or '?'}{' (' + why + ')' if why else ''}; what happened in that window "
@@ -517,6 +541,9 @@ def build(task: str, limit: int = LIMIT, cwd: str = "", view: journal.View | Non
     # Ops: done, failed, in flight.
     t_results = None
     done_l, fail_l, open_l = [], [], []
+    unrec_open: list[tuple[str, str, int]] = []    # commands spooled without contents and no outcome: one line
+    unrec_done: list[tuple[str, str, int]] = []    # ... and those that returned: one line too
+    from .recovery import returned_unrecorded, unrecorded as recovery_unrecorded  # recovery imports this module
     files: dict[str, dict[str, Any]] = {}
     validations = []
     launched: dict[str, dict[str, Any]] = {}   # subagent id -> the Agent outcome that started it
@@ -597,7 +624,28 @@ def build(task: str, limit: int = LIMIT, cwd: str = "", view: journal.View | Non
                 else:
                     why += (f"; the transcript holds {'an error' if err else 'a'} result hooks never saw: "
                             f"{sanitize.clip(sanitize.scrub(body).replace(chr(10), ' '), 100)} (supplementary)")
-            open_l.append((_ext(tool, d), f"- {tool}{who}{_cmdq(d)}: {why} (observed intent, seq {rec['seq']}, op {o['op']})"))
+            ext = _ext(tool, d)
+            if ext == "unrecorded" and not pids:
+                unrec_open.append((tool, o["op"], rec["seq"]))
+                continue
+            open_l.append((ext, f"- {tool}{who}{_cmdq(d)}: {why} (observed intent, seq {rec['seq']}, op {o['op']})"))
+            continue
+        if returned_unrecorded(tool, od):
+            # Its PostToolUse came without its contents (no runtime then): it
+            # returned (or only started: run_in_background); its result isn't known.
+            if recovery_unrecorded(tool, d):
+                unrec_done.append((tool, o["op"], outcome["seq"]))     # nor its command: one line for all
+                continue
+            # Its PreToolUse was recorded with its command (the runtime went
+            # away mid-call): that command, and what isn't known.
+            br = bg_result(st, o["op"], od)
+            ok_ = bg_ok(br)
+            head = (f"- {tool}{who}{_cmdq(d)}: returned (observed, seq {outcome['seq']}), but its result wasn't "
+                    "recorded (no runtime then)")
+            if ok_ is None:
+                done_l.append(f"{head}: whether it worked, or went on in the background, isn't known")
+            else:
+                (done_l if ok_ else fail_l).append(f"{head}; then {bg_text(br)}")
             continue
         if bgw:
             # The call returned, its work went on: started is all that is known,
@@ -641,6 +689,13 @@ def build(task: str, limit: int = LIMIT, cwd: str = "", view: journal.View | Non
         agent = f" agent {res.get('agentId')}" if res.get("agentId") else ""
         done_l.append(f"- {tool}{who}{_cmdq(d)}:{ex or ' ok'}{interp}{agent} (observed, seq {outcome['seq']})")
 
+    if unrec_done:
+        seqs = sorted(s_ for _t, _o, s_ in unrec_done)
+        n_ = len(unrec_done)
+        span = f"seq {seqs[0]}" if n_ == 1 else f"seq {seqs[0]}-{seqs[-1]}"
+        done_l.append(f"- {n_} command{'' if n_ == 1 else 's'} returned whose command and result weren't recorded (no "
+                      f"runtime then), {span}" + (f" ({unrec_done[0][0]}, op {unrec_done[0][1]})" if n_ == 1 else "")
+                      + ": what {} did isn't known".format("it" if n_ == 1 else "they"))
     L = sec.setdefault("Done (observed outcomes)", [])
     completed = [s for s in steps if s.get("status") == "completed"]
     for s in completed[:10]:
@@ -655,10 +710,21 @@ def build(task: str, limit: int = LIMIT, cwd: str = "", view: journal.View | Non
         L = sec.setdefault("Failures (observed)", [])
         L.extend(fail_l[-8:])
     L = sec.setdefault("In flight / unknown", [])
+    if unrec_open:
+        from . import recovery
+        one = len(unrec_open) == 1
+        open_l.insert(0, ("unrecorded*", f"- {recovery.unrecorded_line(unrec_open)}: outcome unknown (observed "
+                                         f"intent{'' if one else 's'}); check {'its' if one else 'their'} effects "
+                                         f"before any retry: {'it' if one else 'they'} may have changed state outside "
+                                         "the repository"))
     if open_l:
         # One that may have changed state outside the repository (a push, a
         # deploy) is never the one cut: those first, then the latest others.
-        ext = [f"{line}; may have changed state outside the repository ({k}): check it before any retry"
+        # (Every command not recorded is in one line, said whole.)
+        ext = [line if k == "unrecorded*" else f"{line}; " + (
+                   "check its effects before any retry: it may have changed state outside the repository"
+                   if k == "unrecorded" else
+                   f"may have changed state outside the repository ({k}): check it before any retry")
                for k, line in open_l if k]
         rest = [line for k, line in open_l if not k]
         cap = 12 if limit < 20000 else 1000   # the CLI's full summary shows them all
@@ -926,7 +992,12 @@ def _jobs_lines(st: TaskState, data: dict[str, Any]) -> list[str]:
             where = f"the gateway, job {gj or '?'} on {d.get('host') or 'localhost'}{pol}"
         else:
             where = "checkpoint's own runner" + (f" ({_t(d.get('why_own'), 100)})" if d.get("why_own") else "")
-        if d.get("outcome") == "unknown":
+        rel = st.released.get(str(d.get("job") or ""))
+        if rel is not None:
+            rd = rel.get("data") or {}
+            state_ = (f"its outcome was never known: released by the person after {rd.get('unknown_days')} day(s) with "
+                      f"no word from the gateway (forget-job; observed, seq {rel['seq']})")
+        elif d.get("outcome") == "unknown":
             state_ = "its start's outcome is unknown (the gateway didn't answer); it was not started elsewhere"
         elif gj and gj in last:
             e = last[gj]["data"]
@@ -1033,11 +1104,12 @@ def task_list(cwd: str = "", limit: int = 10) -> list[dict[str, Any]]:
     return out[:limit]
 
 
-def previous_run_ended(task: str, sid: str) -> bool:
+def previous_run_ended(task: str, sid: str, view: journal.View | None = None) -> bool:
     """Did this session's run before its latest session.start end cleanly
-    (a session.end between the two)? True when there was no earlier run."""
+    (a session.end between the two)? True when there was no earlier run.
+    `view`: the journal already read (recovery.reconcile's)."""
     starts, ends = [], []
-    for r in journal.read(task).records:
+    for r in (view if view is not None else journal.read(task)).records:
         if r.get("session") != sid:
             continue
         if r["kind"] == "session.start":
@@ -1060,14 +1132,14 @@ def session_ended(task: str, sid: str) -> bool:
     return last == "session.end"
 
 
-def interrupted(meta: dict[str, Any]) -> bool:
+def interrupted(meta: dict[str, Any], table: dict[int, dict[str, Any]] | None = None) -> bool:
     """A task whose last session has no recorded end and whose Claude
-    process is gone (or unknown)."""
+    process is gone (or unknown). `table`: the process table already read."""
     sid = meta.get("last_session") or ""
     if not sid or sid in (meta.get("ended") or {}) or (meta.get("finished") or {}).get("how"):
         return False
     pid = state.load_session(sid).get("claude_pid")
     if not isinstance(pid, int):
         return True
-    table = procs.table()
+    table = procs.table() if table is None else table
     return bool(table) and not procs.is_claude(pid, table)

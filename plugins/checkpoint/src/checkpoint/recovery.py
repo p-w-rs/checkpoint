@@ -81,7 +81,16 @@ EXTERNAL_HINT = {
     "publish": "whether that version or item already exists (the registry, the PR or release list)",
     "db": "whether the change is already in the database (query it)",
     "system": "the system state it changes (the service, the file, the schedule)",
+    "unrecorded": "its effects (the files it may have written, processes, remote state: it may have been a push "
+                  "or a deploy)",
 }
+# A command spooled while no runtime was there or on its way (hooks/lib.sh
+# ck_body: the event, the tool and the ids only, `payload_dropped`): what it
+# ran is not known. One with no outcome at all counts as possibly external
+# (effect_of), all of them said in one line that is never cut (Recon's
+# "N commands not recorded"); one that returned (its PostToolUse came) is
+# not an unknown outcome (returned_unrecorded).
+UNRECORDED = "command not recorded (no runtime then)"
 
 READ_ONLY_MCP = re.compile(r"(?:^|_)(?:get|list|read|search|status|tail|show|describe|find|query|fetch|view|check|note)"
                            r"(?:_|$)", re.I)
@@ -96,6 +105,45 @@ def external_effect(tool: str, inp: dict[str, Any] | None) -> str:
     if tool.startswith("mcp__") and not READ_ONLY_MCP.search(tool.rsplit("__", 1)[-1]):
         return "mcp"
     return ""
+
+
+def unrecorded(tool: str, data: dict[str, Any] | None) -> bool:
+    """A command whose input was never recorded (spooled while no runtime
+    was there: `payload_dropped`, an empty input)."""
+    data = data or {}
+    return bool(data.get("payload_dropped") and not data.get("input")
+                and (tool == "Bash" or tool.endswith("__job_start")))
+
+
+def returned_unrecorded(tool: str, od: dict[str, Any] | None) -> bool:
+    """A Bash call spooled without its contents whose PostToolUse came: it
+    returned (capture marks it `background: unknown`, its result unkept).
+    The summary lists it as returned, never as in flight, saying what isn't
+    known (its result; its command too when its PreToolUse wasn't recorded
+    either: those in one line). In flight at a checkpoint it is an unknown
+    outcome, never "confirmed completed" (it may have failed, or only
+    started: run_in_background)."""
+    od = od or {}
+    return tool == "Bash" and od.get("background") == "unknown" and bool(od.get("payload_dropped"))
+
+
+def unrecorded_line(calls: list[tuple[str, str, int]]) -> str:
+    """'N commands not recorded (no runtime then), seq a-b' for the
+    unrecorded commands with no outcome ((tool, op, seq) each): one line for
+    all of them; with one, its tool and op too."""
+    seqs = sorted(seq for _t, _o, seq in calls)
+    span = f"seq {seqs[0]}" if seqs[0] == seqs[-1] else f"seq {seqs[0]}-{seqs[-1]}"
+    if len(calls) == 1:
+        return f"1 command not recorded (no runtime then), {span} ({calls[0][0]}, op {calls[0][1]})"
+    return f"{len(calls)} commands not recorded (no runtime then), {span}"
+
+
+def effect_of(tool: str, data: dict[str, Any] | None) -> str:
+    """external_effect of a journaled call (its record's data), and
+    "unrecorded" for a command nobody knows (it may have been a push):
+    ranked like any possible external effect, never cut."""
+    data = data or {}
+    return external_effect(tool, data.get("input") or {}) or ("unrecorded" if unrecorded(tool, data) else "")
 
 
 def _clock(ts: float | None) -> str:
@@ -175,7 +223,10 @@ class Op:
     hosts: list[str] = field(default_factory=list)   # the gateway hosts it named (hosts.call_hosts)
 
     def q(self, n: int = 100) -> str:
-        """What it did, in backquotes (an edit's path keeps its file name)."""
+        """What it did, in backquotes (an edit's path keeps its file name);
+        for a command never recorded, that."""
+        if self.external == "unrecorded":
+            return UNRECORDED
         return _q(self.what, n, path=self.tool in capture.EDIT_TOOLS)
 
 
@@ -195,6 +246,7 @@ class Recon:
     authz: Any = None                                     # authz.Check: its authorizations against now
     problems: list[str] = field(default_factory=list)
     table_ok: bool = True
+    view: Any = None      # the journal as reconcile read it (once): callers reuse it until something is written
     # Unknown outcomes with a possible external effect that an earlier
     # resume already reported (the work went on after it): one line in
     # "Check first", in full in the summary.
@@ -253,7 +305,21 @@ class Recon:
         other sessions), 2 first (other unknowns and interruptions)."""
         out: list[tuple[int, str]] = []
         hinted: set[str] = set()
+        unrec = [o for o in self.ops if o.cls == "unknown" and o.external == "unrecorded"]
+        if unrec:
+            # Every command spooled without its contents and no outcome, in one
+            # line (round 2 gave each its own never-cut line: a flood).
+            one = len(unrec) == 1
+            line = unrecorded_line([(o.tool, o.op, o.seq) for o in unrec])
+            out.append((0, f"{line}: check {'its' if one else 'their'} effects (the files "
+                           f"{'it' if one else 'they'} may have written, processes, remote state: "
+                           f"{'it' if one else 'any of them'} may have been a push or a deploy) before deciding "
+                           f"anything; {'its outcome is' if one else 'their outcomes are'} unknown, and do not run "
+                           f"{'anything of it' if one else 'any of them'} again until you know what "
+                           f"{'it was' if one else 'they were'}."))
         for o in self.ops:
+            if o.cls == "unknown" and o.external == "unrecorded":
+                continue
             if o.cls == "unknown" and o.external:
                 if o.external in hinted:
                     out.append((0, f"{o.tool} {o.q()} (op {o.op}): outcome unknown too, and it may have changed state "
@@ -266,8 +332,9 @@ class Recon:
                                "before deciding anything; do not run it again until you know (a second run could "
                                "repeat its effect)."))
         if self.earlier:
-            names = ", ".join(o.q(60) for o in self.earlier[:3])
-            more = f" and {len(self.earlier) - 3} more" if len(self.earlier) > 3 else ""
+            shown = list(dict.fromkeys(o.q(60) for o in self.earlier))     # (unrecorded ones read alike: once)
+            names = ", ".join(shown[:3])
+            more = f" and {len(self.earlier) - min(3, len(shown))} more" if len(self.earlier) > min(3, len(shown)) else ""
             out.append((0, f"An earlier resume (seq {self.horizon}) already reported {len(self.earlier)} operation(s) "
                            f"whose outcome is still unknown and that may have changed state outside this repository: "
                            f"{names}{more} (the recovery summary lists them under In flight). If they weren't checked "
@@ -395,11 +462,19 @@ class Recon:
         check_items: 0 an unknown outcome with a possible external effect,
         never cut; 1 what still runs; 2 the rest)."""
         out: list[tuple[int, str]] = []
+        unrec = [o for o in self.ops if o.cls == "unknown" and o.external == "unrecorded"]
         for cls in CLASS_ORDER:
-            for o in [o for o in self.ops if o.cls == cls]:
+            if cls == "unknown" and unrec:
+                line = unrecorded_line([(o.tool, o.op, o.seq) for o in unrec])
+                out.append((0, f"- [{CLASS_TEXT[cls]}] {line}: no result was recorded; check "
+                               f"{'its' if len(unrec) == 1 else 'their'} effects: "
+                               f"{'it' if len(unrec) == 1 else 'they'} may have changed state outside the repository"))
+            for o in [o for o in self.ops if o.cls == cls and not (cls == "unknown" and o.external == "unrecorded")]:
                 tag = f"[{CLASS_TEXT[cls]}]"
                 ext = f"; may have changed state outside the repository ({o.external})" if o.external and cls in (
                     "unknown", "running") else ""
+                if o.external == "unrecorded" and cls in ("unknown", "running"):
+                    ext = "; check its effects: it may have changed state outside the repository"
                 aft = " (after the checkpoint)" if o.after_cp else ""
                 rank = 0 if cls == "unknown" and o.external else 1 if cls == "running" else 2
                 out.append((rank, f"- {tag} {o.tool} {o.q()}{aft}: {o.why}{ext}{self.host_mark(o)} (seq {o.seq}, "
@@ -754,7 +829,7 @@ def _ops(st: summary.TaskState, cp: dict[str, Any] | None, me: str, table: dict[
         what = summary._cmd(d, 200) or tool
         if tool in summary.READ_ONLY_TOOLS or tool in capture.TASK_TOOLS or tool.endswith("__checkpoint_note"):
             continue
-        ext = external_effect(tool, inp)
+        ext = effect_of(tool, d)
         sid = rec.get("session") or ""
         after = bool(cp) and rec["seq"] > cps
         oh = hosts_mod.call_hosts(tool, inp)
@@ -822,7 +897,8 @@ def _ops(st: summary.TaskState, cp: dict[str, Any] | None, me: str, table: dict[
         if od.get("denied"):
             never.append(mk("never", f"denied ({od.get('denied')}): it never ran"))
             continue
-        bgw = summary._background(od, d)
+        returned = returned_unrecorded(tool, od)     # its PostToolUse came, its result wasn't kept
+        bgw = "" if returned else summary._background(od, d)
         if bgw:
             br = summary.bg_result(st, o["op"], od)
             ok_ = summary.bg_ok(br)
@@ -856,7 +932,7 @@ def _ops(st: summary.TaskState, cp: dict[str, Any] | None, me: str, table: dict[
                 why += "; no process runs it now (process table)" if table else "; the process table couldn't be read"
             out.append(mk("unknown", why, "look at its output and effects before running it again"))
             continue
-        if not od.get("ok") and (od.get("interrupted") or o["op"] in st.kills):
+        if not (od.get("ok") or returned) and (od.get("interrupted") or o["op"] in st.kills):
             k = st.kills.get(o["op"])
             how = "stopped by `pause now`" if k else "interrupted"
             out.append(mk("failed", f"{how} before it finished (observed, seq {outcome['seq']}); partial effects are "
@@ -864,9 +940,17 @@ def _ops(st: summary.TaskState, cp: dict[str, Any] | None, me: str, table: dict[
             continue
         if cp and intent is not None and intent["seq"] <= cps < outcome["seq"]:
             # In flight at the checkpoint, ended after it.
+            if returned:
+                # Its PostToolUse came without its result: never "completed"
+                # (it may have failed, or only started: run_in_background).
+                out.append(mk("unknown", f"in flight at the checkpoint; it returned afterwards (observed, seq "
+                              f"{outcome['seq']}), but its result wasn't recorded (no runtime then): whether it "
+                              "worked, or went on in the background, isn't known",
+                              "check its effects before running it again"))
+                continue
+            done = "ended without an error" if od.get("ok") else "failed"
             out.append(mk("completed" if od.get("ok") else "failed",
-                          f"in flight at the checkpoint; {'ended without an error' if od.get('ok') else 'failed'} "
-                          f"afterwards (observed, seq {outcome['seq']})"))
+                          f"in flight at the checkpoint; {done} afterwards (observed, seq {outcome['seq']})"))
     out.extend(never)
     return out
 
@@ -972,7 +1056,7 @@ def _scope(st: summary.TaskState, ops: list[Op]) -> tuple[list[Op], list[Op], in
         if o.cls == "running":
             kept.append(o)
             continue
-        if o.cls in ("failed", "unknown") and ok.get((o.tool, o.what), 0) > o.seq:
+        if o.cls in ("failed", "unknown") and o.external != "unrecorded" and ok.get((o.tool, o.what), 0) > o.seq:
             left += 1
             continue
         if o.cls == "failed" and last.get(o.session, 0) > o.end_seq:
@@ -1011,6 +1095,11 @@ def _gw_job_class(j: dict[str, Any]) -> tuple[str, str]:
             + f" (the gateway, job {gj})")
     if s_ in ("canceled", "failed"):
         return "failed", f"{s_} (the gateway, job {gj}{', ' + str(j.get('stop_reason')) if j.get('stop_reason') else ''})"
+    if s_ == "released":
+        # forget-job: the person stopped checkpoint waiting for the gateway's word on it.
+        return "unknown", (f"outcome unknown: released by the person at {_clock(j.get('released_ts'))} after "
+                           f"{(float(j.get('released_ts') or 0) - jobs.unknown_since(j)) / 86400:.0f} day(s) with no word "
+                           f"from the gateway; checkpoint no longer asks it (job {gj})")
     why = j.get("unknown_why") or "the gateway can't prove its state"
     last = j.get("last_seen") or {}
     seen = f"; last seen {last.get('state')} at {_clock(last.get('at'))}" if last.get("state") else ""
@@ -1178,7 +1267,12 @@ def reconcile(task: str, sid: str = "", checkpoint: str = "", cwd: str = "", pro
               selected: bool = False) -> Recon:
     """Compare the task's saved state (a checkpoint: the one named, else the
     latest; without one, the journal's latest record of each file) with
-    now. Reads only."""
+    now. Reads only, and reads the journal once (Recon.view)."""
+    with sanitize.remembered():     # every command is scrubbed by several of the steps below
+        return _reconcile(task, sid, checkpoint, cwd, prompt, selected)
+
+
+def _reconcile(task: str, sid: str, checkpoint: str, cwd: str, prompt: str, selected: bool) -> Recon:
     view = journal.read(task)
     st = summary.collect(task, view)
     cp = None
@@ -1190,7 +1284,7 @@ def reconcile(task: str, sid: str = "", checkpoint: str = "", cwd: str = "", pro
     base = ({"id": cpd.get("id"), "seq_from": cpd.get("seq_from"), "seq_to": cpd.get("seq_to"), "ts": cp["ts"],
              "reason": cpd.get("reason"), "selected": selected} if cp else {})
     cwd = cwd or (state.load_session(sid).get("cwd") if sid else "") or ""
-    r = Recon(task, base)
+    r = Recon(task, base, view=view)
     if view.problems:
         r.problems.append("journal problems (records after them may be missing): "
                           + "; ".join(p.text() for p in view.problems[:3]))
@@ -1202,7 +1296,7 @@ def reconcile(task: str, sid: str = "", checkpoint: str = "", cwd: str = "", pro
     r.files = _files(st, cp)
     r.git = _git(st, cp, cwd, r.files)
     try:
-        sm = summary.build(task, limit=100000, cwd=cwd)
+        sm = summary.build(task, limit=100000, cwd=cwd, view=view)
         r.validations = sm.data.get("validations") or []
     except Exception as e:  # noqa: BLE001  the rest still says something
         r.problems.append(f"validation staleness couldn't be computed ({type(e).__name__})")
@@ -1462,6 +1556,10 @@ def diff(task: str, a: str = "", b: str = "now") -> tuple[str, dict[str, Any]]:
 # -- export ---------------------------------------------------------------------------
 
 EXPORT_FORMAT = "checkpoint-export/1"
+# The bundle's first line (`_review` sorts before every other key): scrubbing
+# masks known shapes and forms, not every secret a command line can hold.
+EXPORT_REVIEW = ("Scrubbing is pattern-based: known token shapes and credential forms are masked, but a secret in "
+                 "a form no pattern knows stays. Review this file before sharing it.")
 
 
 def _rescrub(obj: Any, depth: int = 0) -> Any:
@@ -1482,9 +1580,15 @@ def _rescrub(obj: Any, depth: int = 0) -> Any:
 def export(task: str, out: str = "", records: int = 5000) -> tuple[bool, str]:
     """A sanitized bundle of the task: its recovery summary, its checkpoints
     (records and saved summaries), a journal excerpt (the last `records`
-    records) and references (paths, ids: never contents, never credentials).
-    Every string goes through the sanitizer again. Written 0600; returns
-    (ok, path or why not)."""
+    records) and references (paths, ids: never file contents). Every string
+    goes through the sanitizer again; that is pattern-based, so the bundle's
+    first field (EXPORT_REVIEW) says to review it before sharing. Written
+    0600; returns (ok, path or why not)."""
+    with sanitize.remembered():     # a summary per checkpoint scrubs the same records again
+        return _export(task, out, records)
+
+
+def _export(task: str, out: str, records: int) -> tuple[bool, str]:
     v = journal.read(task)
     if not v.records:
         return False, f"task {task} has no journal records"
@@ -1507,13 +1611,14 @@ def export(task: str, out: str = "", records: int = 5000) -> tuple[bool, str]:
                                    for s in st.sessions.values()} - {""}),
             "repository": {k: ((st.repo or {}).get("data") or {}).get(k) for k in ("root", "branch", "head")},
             "resume": [f"claude --resume {s}" for s in list(st.sessions)[-3:]]}
-    bundle = {"format": EXPORT_FORMAT, "exported": time.time(), "exported_at": state.now_iso(), "task": task,
+    bundle = {"_review": EXPORT_REVIEW, "format": EXPORT_FORMAT, "exported": time.time(),
+              "exported_at": state.now_iso(), "task": task,
               "meta": {k: meta.get(k) for k in ("goal", "created", "updated", "cwd", "finished", "last_checkpoint")},
               "summary": sm.text, "checkpoints": cps, "references": refs,
               "journal": {"records": v.records[-records:], "total": len(v.records),
                           "problems": [p.text() for p in v.problems]},
-              "note": ("Sanitized task state and references only. It holds no file contents, transcripts or "
-                       "credentials (moving credentials is the gateway's encrypted export).")}
+              "note": ("Sanitized task state and references only: no file contents or transcripts, and secrets "
+                       "masked by pattern (see _review; moving credentials is the gateway's encrypted export).")}
     bundle = _rescrub(bundle)
     # The sha256 of the bundle as written without this field.
     bundle["sha256"] = sanitize.sha256_text(json.dumps(bundle, indent=1, sort_keys=True, default=str))

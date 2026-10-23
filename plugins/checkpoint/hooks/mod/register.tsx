@@ -44,7 +44,8 @@
 //   /check-cancel [interrupt|detach] ends the task (its jobs follow the
 //   policy, stopped all at once; interrupt stops the running command before
 //   the turn ends; the gate holds every tool call while it runs);
-//   /check-stop <job> stops one job of checkpoint's runner; /check-diff
+//   /check-stop <job> stops one job (checkpoint's runner's, or a gateway job
+//   through the gateway); /check-diff
 //   compares checkpoints; /check-list also opens a pane (Checkpoints) whose
 //   rows diff against now or resume from that checkpoint.
 // - Authorization references (0.7.0): a tool.check observer spools Claude
@@ -548,6 +549,10 @@ async function doctor($: E): Promise<string> {
   const surfaces = await $.session.surfaces().catch(() => [] as readonly string[])
   const sid = await $.session.id().catch(() => '')
   const r = await sh($, ['doctor', sid], 20000)
+  // What only Python knows (the journal's integrity, the gateway's answers, a
+  // gateway job stuck unknown that the person can release with `forget-job`),
+  // when a runtime answers (`run` exits 75 at once without one).
+  const py = await sh($, ['run', 'doctor-py', sid], 15000)
   const lines = [
     'checkpoint doctor',
     `- Claude Code: ${v?.version ?? '?'}; mods: on (this report is the mod's; mods need 2.1.287 in the terminal, 2.1.286 in the desktop app)`,
@@ -556,6 +561,7 @@ async function doctor($: E): Promise<string> {
     ...(r.out.trim() ? r.out.trim().split('\n').map(l => `- ${l}`) : ['- runtime report: hooks/env.sh doctor printed nothing']),
   ]
   if (!r.ok) lines.push(`- runtime report failed (exit ${r.code})`)
+  if (py.ok && py.out.trim()) lines.push(...py.out.trim().split('\n').map(l => `- ${l}`))
   return lines.join('\n')
 }
 
@@ -572,7 +578,7 @@ export const register: Register = on => {
     }).catch(failed('check-pause'))
     await $.command.register({
       name: 'check-doctor',
-      description: "checkpoint's diagnostics, at once: versions, runtime, gate, state",
+      description: "checkpoint's diagnostics, at once: versions, runtime, gate, state, journal, gateway jobs",
       immediate: true,
     }).catch(failed('check-doctor'))
     await $.command.register({
@@ -600,7 +606,7 @@ export const register: Register = on => {
     }).catch(failed('check-cancel'))
     await $.command.register({
       name: 'check-stop',
-      description: "Stop one detached job of checkpoint's runner now; without a name, list them (checkpoint)",
+      description: "Stop one detached job now (checkpoint's runner, or a gateway job through the gateway); without a name, list them (checkpoint)",
       argumentHint: '[job]',
       immediate: true,
     }).catch(failed('check-stop'))
@@ -826,9 +832,11 @@ export const register: Register = on => {
   on('command.run', { command: 'check-cancel' }, async ($, e) => ({ text: await cancelTask($, e.args) }))
     .catch(() => ({ text: 'checkpoint: /check-cancel failed; /check:cancel does the same without the mod.' }))
 
-  on('command.run', { command: 'check-stop' }, async ($, e) => ({
-    text: `checkpoint: ${await runPy($, 'stop-job', e.args.trim().split(/\s+/).filter(Boolean), 30000)}`,
-  })).catch(() => ({ text: 'checkpoint: /check-stop failed; /check:stop does the same without the mod.' }))
+  on('command.run', { command: 'check-stop' }, async ($, e) => {
+    // runPy's own failures already start with "checkpoint:"; Python's answer doesn't.
+    const out = await runPy($, 'stop-job', e.args.trim().split(/\s+/).filter(Boolean), 30000)
+    return { text: out.startsWith('checkpoint:') ? out : `checkpoint: ${out}` }
+  }).catch(() => ({ text: 'checkpoint: /check-stop failed; /check:stop does the same without the mod.' }))
 
   on('command.run', { command: 'check-diff' }, async ($, e) => ({
     text: await runPy($, 'diff-session', e.args.trim().split(/\s+/).filter(Boolean)),

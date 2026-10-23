@@ -30,11 +30,12 @@ print) under the session's environment.
             does with it; (b) the daemon stopped: checkpoint says not
             available, runs its job itself, Bash runs unmanaged; enabled again
   incompat  the gateway updated to a build whose contract is v2 only
-            (CONTRACT_VERSIONS = [2]): the gateway works, checkpoint says
-            "gateway contract mismatch (has 2, needs 1)" and runs its job itself
+            (CONTRACT_VERSIONS = [2]; version <installed major.minor>.2000):
+            the gateway works, checkpoint says "gateway contract mismatch (has
+            2, needs 1)" and runs its job itself
   upgrade   the gateway updated again to a compatible newer version and
-            checkpoint to a newer version: checkpoint sees the new gateway and
-            delegates again
+            checkpoint to a newer version (<installed major.minor>.3000 each):
+            checkpoint sees the new gateway and delegates again
 
 Prints one line per check and a JSON summary to
 --tmp/acceptance-independence.json; exits non-zero on any failure.
@@ -301,6 +302,18 @@ def patched_gateway(src: Path, dest: Path) -> Path:
     return dest
 
 
+def newer(version: str, patch: int) -> str:
+    """A version newer than an installed one: its major.minor with a large patch number (gate 0.10.0 ->
+    0.10.3000, check 0.8.0 -> 0.8.3000), so an update publishes a real upgrade whatever the checkouts'
+    versions (fixed numbers like 0.9.3000 / 0.7.3000 became downgrades with gate 0.10.0 and check 0.8.0)."""
+    major, minor = version.split(".")[:2]
+    return f"{major}.{minor}.{patch}"
+
+
+def vkey(version: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in re.findall(r"\d+", version)[:3])
+
+
 def patched_checkpoint(src: Path, dest: Path, version: str) -> Path:
     install.snapshot_tree(src, dest)
     pj = dest / "plugins" / "checkpoint" / ".claude-plugin" / "plugin.json"
@@ -374,6 +387,7 @@ def part_both_and_more(root: Path, env: dict, gsrc: Path, only: set[str]) -> Non
         if not box.build():
             return
         pid_c, pid_g = "check@checkpoint", box.gi.plugin.id
+        base_gate, base_ck = box.gi.plugin.version, box.p.version   # as installed from the checkouts
         if "both" in only:
             print("both: both installed", flush=True)
             s = box.session("both")
@@ -500,8 +514,10 @@ def part_both_and_more(root: Path, env: dict, gsrc: Path, only: set[str]) -> Non
             print("incompat: the gateway updated to a contract-v2-only build", flush=True)
             stop_gated(box)
             src2 = patched_gateway(gsrc, root / "gw-src-v2")
-            gi2 = box.h.update_gateway_e2e(src2, version="0.9.2000")
-            check("[incompat] the gateway updates to 0.9.2000 (contract v2 only)", gi2.plugin.version == "0.9.2000")
+            gv2 = newer(base_gate, 2000)
+            gi2 = box.h.update_gateway_e2e(src2, version=gv2)
+            check(f"[incompat] the gateway updates to {gv2} (contract v2 only; newer than the installed {base_gate})",
+                  gi2.plugin.version == gv2 and vkey(gv2) > vkey(base_gate))
             box.gi = gi2
             s = box.session("incompat")
             try:
@@ -531,11 +547,14 @@ def part_both_and_more(root: Path, env: dict, gsrc: Path, only: set[str]) -> Non
         if "upgrade" in only:
             print("upgrade: compatible newer gateway, newer checkpoint", flush=True)
             stop_gated(box)
-            gi3 = box.h.update_gateway_e2e(gsrc, version="0.9.3000")
-            ck2 = patched_checkpoint(REPO, root / "ck-src-0.7.3000", "0.7.3000")
+            prev_gate = box.gi.plugin.version      # the incompat build's when that part ran
+            gv3, cv3 = newer(base_gate, 3000), newer(base_ck, 3000)
+            gi3 = box.h.update_gateway_e2e(gsrc, version=gv3)
+            ck2 = patched_checkpoint(REPO, root / f"ck-src-{cv3}", cv3)
             p3 = box.h.update_from(ck2, repo="checkpoint", plugin="check")
-            check("[upgrade] gate 0.9.3000 and check 0.7.3000 installed",
-                  gi3.plugin.version == "0.9.3000" and p3.version == "0.7.3000")
+            check(f"[upgrade] gate {gv3} and check {cv3} installed (newer than gate {prev_gate} and check {base_ck})",
+                  gi3.plugin.version == gv3 and p3.version == cv3
+                  and vkey(gv3) > vkey(prev_gate) and vkey(cv3) > vkey(base_ck))
             box.gi = gi3
             s = box.session("upgrade")
             try:
@@ -545,8 +564,8 @@ def part_both_and_more(root: Path, env: dict, gsrc: Path, only: set[str]) -> Non
                 wait(s, lambda: "check: recording" in s.text(), 60)
                 gw = ck_view(s, box, "upgrade", "gateway")
                 SUMMARY["upgrade_gateway"] = gw.splitlines()[:1]
-                check("[upgrade] checkpoint sees the upgraded gateway (available, 0.9.3000, contract v1)",
-                      "Gateway: available (0.9.3000" in gw, gw[:300])
+                check(f"[upgrade] checkpoint sees the upgraded gateway (available, {gv3}, contract v1)",
+                      f"Gateway: available ({gv3}" in gw, gw[:300])
                 if offer(s, CK_JOB):
                     rec = ck_job(s, box, 8)
                     check("[upgrade] and hands its job to it again (owner gateway)", rec is not None

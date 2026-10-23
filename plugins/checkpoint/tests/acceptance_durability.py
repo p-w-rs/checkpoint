@@ -28,9 +28,9 @@ runtimes built first, the harness's fake Messages API, bypassPermissions.
              kept; paused, a call is denied (fail closed). The gateway's daemon
              SIGSTOPped: what a Bash call and a protected Read do, and how long
              they take; SIGCONT
-  upgrade    a gateway job running, the gateway updated (0.9.1000) and checkpoint
-             updated (0.7.1000): a new session on the new versions still sees the
-             job running and its journal goes on
+  upgrade    a gateway job running, the gateway and checkpoint updated (each to
+             <installed major.minor>.1000): a new session on the new versions
+             still sees the job running and its journal goes on
   overhead   ten Bash calls in one turn with no plugin, checkpoint alone, and both:
              the per-call round trip (fake model + hooks + command) compared
 
@@ -420,12 +420,15 @@ def part_upgrade(root: Path, box, gsrc: Path) -> None:
     finally:
         s.close()
     n_before = len(records(box.home))
-    gi2 = box.h.update_gateway_e2e(gsrc, version="0.9.1000")
-    ck2 = AI.patched_checkpoint(REPO, root / "ck-src-up", "0.7.1000")
+    prev_g, prev_c = box.gi.plugin.version, box.p.version
+    gv, cv = AI.newer(prev_g, 1000), AI.newer(prev_c, 1000)   # newer than the installed ones, whatever they are
+    gi2 = box.h.update_gateway_e2e(gsrc, version=gv)
+    ck2 = AI.patched_checkpoint(REPO, root / "ck-src-up", cv)
     p2 = box.h.update_from(ck2, repo="checkpoint", plugin="check")
     box.gi = gi2
-    check("upgrade: both updated (gate 0.9.1000, check 0.7.1000)", gi2.plugin.version == "0.9.1000"
-          and p2.version == "0.7.1000")
+    check(f"upgrade: both updated (gate {gv}, check {cv}: newer than the installed {prev_g} and {prev_c})",
+          gi2.plugin.version == gv and p2.version == cv
+          and AI.vkey(gv) > AI.vkey(prev_g) and AI.vkey(cv) > AI.vkey(prev_c))
     s = driver.Session(root / "up-s2", proj, config_dir=box.cfg, extra_env=dict(box.env),
                        permission_mode="bypassPermissions", debug_file=True, cols=160, rows=45, start=False)
     try:

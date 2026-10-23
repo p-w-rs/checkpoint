@@ -1,6 +1,6 @@
 {
   "name": "check",
-  "version": "0.7.3",
+  "version": "0.8.0",
   "description": "Automatic, durable task tracking (a journal of prompts, tool calls, plan steps, file hashes, test runs and sessions), recovery that reconciles before it resumes (changed files kept, stale tests, interrupted operations classified, unknown external effects checked, never repeated blindly), checkpoints to list, diff, resume from and export, pausing at once or at the next tool call, cancel and stop, and detached jobs that survive (run and supervised by the gateway plugin when it is installed, with per-job pause policies).",
   "author": {
     "name": "p-w-rs"

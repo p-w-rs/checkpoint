@@ -1,5 +1,7 @@
 # checkpoint: design
 
+> History: the 0.1/0.2 design and the spikes it rests on, kept as written. Parts are superseded (the pause below "interrupts nothing"; 0.3.0 added an immediate one): the current design is [ARCHITECTURE.md](ARCHITECTURE.md).
+
 Status: **built** (v0.1.0, 2026-10-15; v0.2.0, 2026-10-18: see "0.2.0
 revisions" at the end); see
 [ARCHITECTURE.md](ARCHITECTURE.md). Since 0.3.0 [PLAN-v4.md](PLAN-v4.md)
@@ -287,7 +289,8 @@ can find it.
    stops), so the deny must always be in the same output.
 5. **Checkpoint**: `checkpoint.json` holds plain facts: last ~10 tool calls
    (from the transcript), `git status` + diff stat, the session's jobs and
-   their states, time paused. The gate writes it on the first deny, and
+   their states, time paused (all scrubbed since 0.8.0, and the hook keeps
+   the work folder out of git). The gate writes it on the first deny, and
    the **Stop** hook refreshes it if Stop fires. Spike 3: when
    `continue: false` ends the turn, **Stop does not fire**, so Stop can't be
    the only writer.

@@ -1,6 +1,6 @@
 ---
 name: stop
-description: "Stop one detached job of checkpoint's runner (its whole process group); without a name, list the running ones"
+description: "Stop one detached job (checkpoint's runner: its whole process group; a gateway job: through the gateway); without a name, list the running ones"
 argument-hint: "[<job name or id>]"
 disable-model-invocation: true
 ---

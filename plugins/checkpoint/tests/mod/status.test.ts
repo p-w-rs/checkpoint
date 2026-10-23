@@ -24,7 +24,7 @@ test('statusOf: normal states for the footer, a pause, failures and unknown for 
   expect(s(false, 'nopixi')).toEqual({ text: 'no runtime: pixi not found · /check-doctor; pausing works', warn: true })
   expect(s(false, '')).toEqual({ text: 'state unknown (/check-doctor)', warn: true })
   expect(s(false, 'ready', true)).toEqual({ text: 'recording FAILED · /check-doctor', warn: true })
-  expect(s(true, '')).toEqual({ text: 'paused · type a message or /check:resume to resume', warn: true })
+  expect(s(true, '')).toEqual({ text: 'paused · type a message (any non-/check command resumes) or /check:resume', warn: true })
 })
 
 test("pluginDataDir: an installed copy's data folder, --plugin-dir's, none without a config folder", async () => {
@@ -113,7 +113,7 @@ test('a pause moves the state to the status line, and a resume back to the foote
   expect(w.statuses).toEqual([])
   await $.command.run({ command: 'check-pause', args: '', origin: COMPOSER, presentation: PRESENT })
   await settle(w, () => w.statuses.length > 0)
-  expect(w.statuses.at(-1)).toBe('paused · type a message or /check:resume to resume')
+  expect(w.statuses.at(-1)).toBe('paused · type a message (any non-/check command resumes) or /check:resume')
   expect(await footer($, w)).toEqual(['focus'])
   w.files.delete(FLAG) // the classic hook resumed
   await w.clock.advance(2000)

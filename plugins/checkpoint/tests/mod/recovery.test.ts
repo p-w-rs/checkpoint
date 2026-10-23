@@ -43,7 +43,7 @@ test('pure helpers: interrupt is now, the cancel policy, rows, the new commands 
   expect(parseCancelArgs('')).toEqual({ policy: '', note: '' })
   expect(parseCancelArgs('detach no longer needed')).toEqual({ policy: 'detach', note: 'no longer needed' })
   expect(parseCancelArgs('interrupt')).toEqual({ policy: 'interrupt', note: '' })
-  for (const c of ['list', 'diff c_1', 'cancel', 'stop train', 'complete', 'export last', 'save']) {
+  for (const c of ['list', 'diff c_1', 'cancel', 'stop train', 'complete', 'export last', 'save', 'forget t_1']) {
     expect(typedResumes(`/check:${c}`)).toBe(false)
   }
   expect(typedResumes('/check:resume c_1')).toBe(true)
@@ -181,6 +181,33 @@ test('/check-stop and /check-diff answer at once from Python, also while paused,
   // the tool gate still holds while paused
   const r = await $.tool.call({ tool: 'Bash', tool_use_id: 'b1', command: 'ls', description: 'x' } as never) as { deny?: string; isError?: boolean; text?: string }
   expect(r.deny ?? (r.isError ? String(r.text) : undefined)).toContain('Paused by the user')
+})
+
+test('/check-stop: one "checkpoint:" prefix, whether Python answered, failed, or no runtime is ready', async ($, on) => {
+  const log: string[] = []
+  const w = world(on, { answers: { ...answers(log), 'stop-job': () => ran(1, '') } })
+  await start($)
+  const failed = await $.command.run({ command: 'check-stop', args: 'train', origin: COMPOSER, presentation: PRESENT })
+  expect(failed.text).toBe('checkpoint: stop-job failed (exit 1); /check-doctor says why.')
+  void w
+})
+
+test('/check-stop without a ready runtime: said once, not "checkpoint: checkpoint:"', async ($, on) => {
+  world(on, { envReady: false })
+  await start($)
+  const out = await $.command.run({ command: 'check-stop', args: 'train', origin: COMPOSER, presentation: PRESENT })
+  expect(out.text).toBe("checkpoint: checkpoint's runtime isn't ready yet (first-time setup).")
+  expect(out.text).not.toContain('checkpoint: checkpoint:')
+})
+
+test('/check-stop names gateway jobs in its description, and an answer from Python gets the prefix once', async ($, on) => {
+  const log: string[] = []
+  const w = world(on, { answers: answers(log) })
+  await start($)
+  const reg = w.registered.find(r => r.name === 'check-stop') as { description?: string } | undefined
+  expect(reg?.description).toContain('gateway job')
+  const st = await $.command.run({ command: 'check-stop', args: 'train', origin: COMPOSER, presentation: PRESENT })
+  expect(st.text).toBe('checkpoint: Job train (train-1) stopped: its process group got SIGTERM and is gone.')
 })
 
 test('/check-list opens the Checkpoints pane: rows with their staleness, diff with now, resume from here', async ($, on) => {

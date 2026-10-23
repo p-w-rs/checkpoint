@@ -337,8 +337,8 @@ queued_targets_me() {
 degraded_session() {
     ck_kick retry
     case $(ck_state) in
-    nopixi) msg="checkpoint: pixi not found, so checkpoint can't set itself up (no trackers or job tools; pausing still works). Install pixi from https://pixi.sh, then restart Claude Code." ;;
-    failed) msg="checkpoint: setting up its runtime failed ($(ck_fail_line)); it is retried at every session start. Pausing still works; /check:doctor has details (log: $ENVD/install.log)." ;;
+    nopixi) msg="checkpoint: pixi not found, so checkpoint can't set itself up (no trackers or job tools; pausing still works; until then it records which tools ran, not their contents). Install pixi from https://pixi.sh, then restart Claude Code." ;;
+    failed) msg="checkpoint: setting up its runtime failed ($(ck_fail_line)); it is retried at every session start. Pausing still works; until then it records which tools ran, not their contents. /check:doctor has details (log: $ENVD/install.log)." ;;
     *) msg="checkpoint: first-time setup is running in the background (usually under a minute). Pausing works meanwhile; trackers and the job tools start once it is done." ;;
     esac
     ctx="checkpoint (plugin) is still setting up its runtime, so its tracker notes and job tools aren't available yet. If a tool call is denied because the session is paused, don't start new work: end your turn with one line saying you're paused."
@@ -370,7 +370,7 @@ prompt_fallback() {
         'pause now!' | 'pause interrupt' | 'pause interrupt.' | 'pause interrupt!')
         [ -n "$nr" ] && return 0
         paused || ck_write "$st/flags/$sid" "$(ck_now) fallback"
-        prompt_ctx "<checkpoint-result>Paused: this session stops at its next tool call ($note; a running command keeps running). Any message resumes it.</checkpoint-result> Don't start anything new: end your turn with one line saying you're paused."
+        prompt_ctx "<checkpoint-result>Paused: this session stops at its next tool call ($note; a running command keeps running). Type a message to resume it (any non-/check command resumes).</checkpoint-result> Don't start anything new: end your turn with one line saying you're paused."
         ;;
     '/check:pause '* | 'pause all'* | 'pause now all'* | 'pause interrupt all'*)
         [ -n "$nr" ] && return 0
@@ -387,7 +387,8 @@ prompt_fallback() {
     /check:status* | /check:help*)
         prompt_ctx "<checkpoint-result>$note: sessions and jobs can't be listed yet. /check:doctor says why.</checkpoint-result>"
         ;;
-    /check:list* | /check:diff* | /check:stop* | /check:cancel* | /check:complete* | /check:export* | /check:save*)
+    /check:list* | /check:diff* | /check:stop* | /check:cancel* | /check:complete* | /check:export* | /check:save* | \
+        /check:forget*)
         # Inspection and management never resume, also without Python.
         prompt_ctx "<checkpoint-result>Not done: $note, and this command needs it. /check:doctor says why.</checkpoint-result>"
         ;;
@@ -415,9 +416,12 @@ case $ev in
 SessionStart)
     mkdir -p "$st" 2>/dev/null
     chmod 700 "$st" 2>/dev/null
+    # The env first: the spool asks whether a runtime is there (ck_body), and
+    # must not take the one an earlier run recorded in rt/<session> (an update
+    # brings a new one).
+    ck_env
     ck_spool "$sid" SessionStart
     ck_arm "$sid" # the reserves a recording failure on a full disk becomes
-    ck_env
     ck_write "$st/rt/$sid" "$ENVD"
     CHECKPOINT_ENVD=$ENVD
     write_helper
@@ -442,6 +446,8 @@ SessionStart)
     else
         degraded_session
     fi
+    # Spools of sessions gone for a week (after Python ingested what it could).
+    ck_spool_prune "$sid"
     ;;
 
 UserPromptSubmit)
@@ -575,9 +581,12 @@ PostToolUse | PostToolUseFailure)
     tid=$(ck_safe "$(field tool_use_id)")
     [ -n "$tid" ] && rm -f "$st/running/$tid.json" 2>/dev/null
     mkdir -p "$st/count" "$st/turn" 2>/dev/null
+    # Counters other hooks of the session may be writing at the same moment: a
+    # torn read is no number (0), and never one with a leading zero (sh
+    # arithmetic would read it as octal, and 08 kills the hook).
     t=$(cat "$st/turn/$sid" 2>/dev/null)
-    t=${t:-0}
-    echo $((t + 1)) > "$st/turn/$sid" 2>/dev/null
+    case $t in '' | *[!0-9]*) t=0 ;; *) t=${t#"${t%%[!0]*}"} ;; esac
+    echo $((${t:-0} + 1)) > "$st/turn/$sid" 2>/dev/null
     # A write to a tracker resets the reminder counter.
     if printf '%s' "$input" | grep -Eq '"tool_name"[[:space:]]*:[[:space:]]*"(Write|Edit|MultiEdit)"' &&
         printf '%s' "$input" | grep -Eq '"file_path"[[:space:]]*:[[:space:]]*"[^"]*TRACKER\.md"'; then
@@ -596,8 +605,8 @@ PostToolUse | PostToolUseFailure)
         exit 0
     fi
     n=$(cat "$st/count/$sid" 2>/dev/null)
-    n=${n:-0}
-    n=$((n + 1))
+    case $n in '' | *[!0-9]*) n=0 ;; *) n=${n#"${n%%[!0]*}"} ;; esac
+    n=$((${n:-0} + 1))
     echo $n > "$st/count/$sid" 2>/dev/null
     # Same variable and default as state.nudge_every().
     every=${CHECKPOINT_NUDGE_EVERY:-25}

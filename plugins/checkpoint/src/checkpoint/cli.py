@@ -16,11 +16,17 @@ by default ~/.local/state/checkpoint):
     ~/.local/state/checkpoint/checkpoint reconcile <task>|last [<cp>]    what a resume would check first
     ~/.local/state/checkpoint/checkpoint export <task>|last [<path>]     a sanitized bundle (0600)
     ~/.local/state/checkpoint/checkpoint stop <job>             stop one job (checkpoint's runner, or the gateway's)
+    ~/.local/state/checkpoint/checkpoint forget-job <job>       stop waiting for a gateway job unknown for over 7 days
+                                                                with no word from the gateway (its outcome stays unknown)
     ~/.local/state/checkpoint/checkpoint prune [--dry-run]      journals past retention (CHECKPOINT_KEEP_DAYS ...)
+    ~/.local/state/checkpoint/checkpoint forget <task> [--dry-run]   delete one task's history (journal, checkpoints,
+                                                                its finished jobs; not while it runs or is paused)
+    ~/.local/state/checkpoint/checkpoint purge [--dry-run]      delete all history but what a live or paused session
+                                                                or a running job needs; says what it removes
     ~/.local/state/checkpoint/checkpoint gateway                what checkpoint sees of the gateway (CONTRACT-v1)
 (An un-paused session continues when you send it a message, and gets its
 resume notes then.) In a checkout, `pixi run status` etc. do the same.
-Internal (hooks and the mod): ingest <session> [--sync], snap <session> <tool_use_id>,
+Internal (hooks and the mod): ingest <session> [--sync], snap <session> <tool_use_id>, doctor-py [<session>],
 gw-pause <session> (the gateway's half of the mod's /check-pause),
 status --session <session>, list-json <session>, resume-now <session> [<checkpoint>],
 cancel <session> [interrupt|detach], complete <session> [note], stop-job <session> <job>,
@@ -33,7 +39,7 @@ import sys
 import json
 import time
 
-from . import capture, core, gateway, journal, recovery, sanitize, state, summary
+from . import capture, core, gateway, journal, purge, recovery, sanitize, state, summary
 
 USAGE = __doc__
 
@@ -122,6 +128,14 @@ def main(argv: list[str]) -> int:
     if cmd == "stop":
         print(core.stop_job("", args))
         return 0
+    if cmd == "forget-job":
+        if not args:
+            print("Say which job: `forget-job <job id>` (`status` lists them; /check:doctor names the ones stuck "
+                  "unknown).", file=sys.stderr)
+            return 2
+        ok, msg = core.forget_job(args[0])
+        print(msg)
+        return 0 if ok else 1
     if cmd == "prune":
         dry = "--dry-run" in args
         gone = recovery.prune_tasks(dry_run=dry)
@@ -129,6 +143,15 @@ def main(argv: list[str]) -> int:
               + (f": {', '.join(gone)}" if gone else "") + f" (finished tasks after {state.journal_keep_days() or 'never'} "
               f"day(s), open ones after {state.journal_keep_open_days() or 'never'}).")
         return 0
+    if cmd == "forget":
+        refs = [a for a in args if a != "--dry-run"]
+        ok, msg = purge.forget(refs[0] if refs else "", dry_run="--dry-run" in args)
+        print(msg)
+        return 0 if ok else 1
+    if cmd == "purge":
+        ok, msg = purge.purge(dry_run="--dry-run" in args)
+        print(msg)
+        return 0 if ok else 1
     if cmd == "summary":
         limit = summary.LIMIT
         if "--limit" in args:
@@ -157,6 +180,11 @@ def main(argv: list[str]) -> int:
         return 0
     if cmd == "doctor":
         print(core.doctor_text(args[0] if args else ""))
+        return 0
+    if cmd == "doctor-py":
+        # The mod's /check-doctor: the lines only Python knows, after its shell report.
+        sid = args[0] if args else ""
+        print("\n".join(core.journal_doctor(sid) + core.gateway_doctor(sid)))
         return 0
     if cmd == "pause":
         if not [a for a in args if a not in ("now", "--stop-jobs")]:

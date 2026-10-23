@@ -351,7 +351,7 @@ check("job tools are named as the gateway, pixi-guard, fast.sh and state.py matc
       | {t for t in state.ALLOW_WHILE_PAUSED if "jobs__" in t} <= JOB_TOOLS | {NOTE_TOOL, POLICY_TOOL})
 _job_docs = {"README.md": read_or_empty(REPO / "README.md"),
              "help": read_or_empty(ROOT / "skills" / "help" / "SKILL.md"),
-             "DESIGN.md": read_or_empty(REPO / "docs" / "DESIGN.md")}
+             "DESIGN.md": read_or_empty(REPO / "docs" / "dev" / "DESIGN.md")}
 for _doc, _text in _job_docs.items():
     _flat = " ".join(_text.split())
     check(f"{_doc}: what the gateway and pixi-guard check at job_start, the masking, and where to read more",
@@ -393,7 +393,8 @@ def link_ok(doc, target):
     return p.is_relative_to(REPO.resolve()) and p.exists()
 
 
-_docs = [REPO / "README.md", REPO / "CLAUDE.md", *sorted((REPO / "docs").glob("*.md")),
+# Every Markdown file at the top (README, CLAUDE, CHANGELOG, SECURITY) and under docs/ (docs/dev/ too).
+_docs = [*sorted(REPO.glob("*.md")), *sorted((REPO / "docs").rglob("*.md")),
          *sorted((ROOT / "skills").glob("*/SKILL.md"))]
 _bad = [f"{d.relative_to(REPO)}: {t}" for d in _docs for t in doc_links(d) if not link_ok(d, t)]
 if _bad:
@@ -1107,6 +1108,24 @@ check("...but a live process at that pid that started long before the job (a reu
       jobs._refresh_state(dict(_frec), {999999: dict(_fpt[999999], start=time.time() - 3600)})["state"] == "vanished")
 check("session filter", {j["name"] for j in jobs.status(session_id=SID)["jobs"]}
       == {"quick", "long", "stubborn", "sticky", "gone"})
+# A job's log is capped (here 4 KiB, looked at every 0.2 s): the wrapper moves
+# a log past half of it to output.log.1, so a verbose job can't fill the disk.
+os.environ.update(CHECKPOINT_JOB_LOG_KEEP="4096", CHECKPOINT_JOB_LOG_CHECK="0.2")
+_burst = "b() { i=0; while [ $i -lt 30 ]; do echo line-$1-" + "0123456789" * 9 + "; i=$((i+1)); done; }; "
+r = jobs.start("capped", command=_burst + "b 1; sleep 1; b 2; sleep 1; b 3; sleep 1; b 4; sleep 1; echo LAST-LINE; "
+               "sleep 0.5", cwd=str(PROJ), redo_hint="", session_id="sess-capped")
+del os.environ["CHECKPOINT_JOB_LOG_KEEP"], os.environ["CHECKPOINT_JOB_LOG_CHECK"]
+_cap = jobs.find("capped") or {}
+check("a verbose job's log is capped: rotated into output.log.1 while it runs, neither file past the cap and one "
+      "look's output", lambda: wait_for(lambda: job("capped").get("state") == "exited", 15)
+      and Path(_cap["log"]).stat().st_size <= 2048 + 3200 and Path(_cap["log"] + ".1").stat().st_size <= 2048 + 3200
+      and int((Path(_cap["log"]).parent / "log_rotated").read_text().split()[0]) >= 2)
+check("...job_status says its earliest output was dropped; job_tail still ends with its last line",
+      lambda: "earliest" in job("capped").get("log_truncated", "") and "were dropped" in job("capped")["log_truncated"]
+      and jobs.tail("capped", 5)["tail"].endswith("LAST-LINE")
+      and "log_truncated" in jobs.tail("capped", 5)["job"] and "log_truncated" not in job("quick"))
+check("...and the watcher ends with the job: nothing of its process group is left",
+      lambda: _cap.get("pgid") and wait_for(lambda: not procs.group_alive(_cap["pgid"]), 5))
 check("both command and argv refused", not jobs.start("x", command="a", argv=["b"])["ok"])
 check("missing cwd refused", not jobs.start("x", command="a", cwd=str(TMP / "nope"))["ok"])
 
@@ -1555,6 +1574,8 @@ table = procs.table()
 check("find_claude walks past shells to 'claude'", procs.find_claude(fc.pid, table) == fc.pid)
 check("find_claude: none above a plain shell", procs.find_claude(hk.pid, table) in (None,) or
       "claude" in table.get(procs.find_claude(hk.pid, table) or 0, {}).get("cmd", "").lower())
+# macOS ps shows a process that has just started as `?` or `U` for a moment: read until it settles.
+wait_for(lambda: (table.update(procs.table()) or table.get(hk.pid, {}).get("stat", "?")[:1] in "RS"), 5)
 check("table has process states and start times", lambda: table[hk.pid]["stat"][:1] in "RS"
       and abs(table[hk.pid]["start"] - time.time()) < 30)
 hk.kill()
@@ -2287,6 +2308,8 @@ for sid, pid, paused in (("old-dead", dead.pid, False), ("old-dead-paused", dead
                          started_ts=now - 3600 if sid == "new-dead" else old)
     for d in ("count", "turn", "seen"):
         state.touch(state.p(d, sid), "1")
+    state.touch(gateway.cursor_path(sid), "{}")             # the gateway's event cursor
+    state.touch(state.p("gateway", sid + ".lock"), "")      # its pause/resume lock (core._gw_lock)
     if paused:
         state.set_paused(sid, by="test")
     if sid != "new-dead":
@@ -2317,8 +2340,11 @@ res = state.prune(force=True)
 check("an old session whose process is gone is pruned, with its files",
       not state.session_path("old-dead").exists() and not state.p("count", "old-dead").exists()
       and not state.p("checkpoints", "old-dead.json").exists())
-check("...but not a paused one, a live one, or a recent one",
-      all(state.session_path(s).exists() for s in ("old-dead-paused", "old-live", "new-dead")))
+check("...its gateway cursor and lock too (gateway/<sid>.json, .lock)",
+      not gateway.cursor_path("old-dead").exists() and not state.p("gateway", "old-dead.lock").exists())
+check("...but not a paused one, a live one, or a recent one (nor their gateway cursors)",
+      all(state.session_path(s).exists() and gateway.cursor_path(s).exists()
+          for s in ("old-dead-paused", "old-live", "new-dead")))
 check("running files of dead sessions, or older than a day, are pruned",
       not state.p("running", "stale-dead.json").exists() and not state.p("running", "stale-old.json").exists()
       and state.p("running", "current.json").exists())
@@ -2596,6 +2622,8 @@ lock3 = Path(f"{ENVD3}.building")
 check("a slow build holds the lock with the builder's and pixi's pids",
       wait_for(lambda: (lock3 / "pid").exists() and (lock3 / "pixi").exists(), 10)
       and (lock3 / "pid").read_text().strip() == str(p3.pid))
+# The lock names pixi's pid as soon as it is forked: let the fake pixi log its call before the kill.
+wait_for(lambda: any(c.startswith("install") for c in pixi_calls(E3)), 10)
 os.killpg(p3.pid, signal.SIGKILL)
 p3.wait(timeout=10)
 E3b = dict(E3)
@@ -3284,6 +3312,113 @@ else:
         print("  note: " + "\n        ".join(out.strip().splitlines()))
         print("        (`pixi run release-check` before committing)")
 
+# --- checkpoint.json in the user's project -----------------------------------------------
+# It sits next to the tracker, in the user's working tree: nothing unscrubbed
+# goes in, and the work folder is kept out of git by the hook itself, not by
+# the model following the session note. Synthetic secrets, never printed.
+print("checkpoint.json in the project: scrubbed, the work folder in the clone's exclude file:")
+if shutil.which("git") is None:
+    print("  note: git not found; checkpoint.json's exclude not tested")
+else:
+    import secrets as _sec
+    import string as _str
+
+    def _canary(n):
+        return "".join(_sec.choice(_str.ascii_letters + _str.digits) for _ in range(n))
+
+    CPJ_GHP, CPJ_PW, CPJ_TOK, CPJ_JOB, CPJ_INT = ("ghp_" + _canary(36), _canary(16), _canary(24), "ghp_" + _canary(36),
+                                                  _canary(16))
+    CPJ_ALL = (CPJ_GHP, CPJ_PW, CPJ_TOK, CPJ_JOB, CPJ_INT)
+    # git in the hook never reads the user's config (a global excludes file
+    # could ignore .work/ already).
+    CPJ_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+               "GIT_CEILING_DIRECTORIES": str(TMP.resolve())}
+
+    def cpj_project(name, sid, tracked=False):
+        proj = TMP / name
+        (proj / ".work" / "deploy").mkdir(parents=True)
+        tgit(proj, "init", "-q")
+        (proj / ".work" / "deploy" / "TRACKER.md").write_text(
+            f"# Deploy\nSession: {sid}\n\n## Stages\n| # | Stage | Status | N |\n|---|---|---|---|\n"
+            "| 1 | Release | in progress | |\n")
+        if tracked:     # this repository commits its trackers
+            tgit(proj, "add", ".work")
+            tgit(proj, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "trackers")
+        tp = TMP / f"{name}.jsonl"
+        tp.write_text("")
+        for i, (tool, inp) in enumerate((("Bash", {"command": f"export GH_TOKEN={CPJ_GHP}"}),
+                                         ("Bash", {"command": f"mysql -u admin -p{CPJ_PW} prod < m.sql"}),
+                                         ("mcp__other__call", {"token": CPJ_TOK, "q": "deploy"}))):
+            tline({"type": "assistant", "timestamp": f"2026-10-16T02:00:0{i}.000Z", "message": {"content": [
+                {"type": "tool_use", "id": f"{name}-{i}", "name": tool, "input": inp}]}}, tp)
+        return proj, tp
+
+    def cpj_pause(proj, tp, sid, before=None):
+        pl = {"session_id": sid, "transcript_path": str(tp), "cwd": str(proj)}
+        hook("SessionStart", dict(pl, hook_event_name="SessionStart", source="startup"), CPJ_ENV)
+        if before:
+            before()
+        hook("UserPromptSubmit", dict(pl, prompt="/check:pause"), CPJ_ENV)
+        return hook("PreToolUse", dict(pl, hook_event_name="PreToolUse", tool_name="Bash", tool_use_id=f"{sid}-x",
+                                       tool_input={"command": "ls"}), CPJ_ENV)
+
+    def excl(proj):
+        p = proj / ".git" / "info" / "exclude"
+        return p.read_text() if p.exists() else ""
+
+    CPJ_SID = "sess-cpjson-5555-6666"
+    CPJ, CPJ_TP = cpj_project("cpjson-proj", CPJ_SID)
+    _cpj_job = jobs.start("cpj-deploy", command=f"API_TOKEN={CPJ_JOB} sleep 30", cwd=str(CPJ), session_id=CPJ_SID)
+    # What `pause now` records of a command it stopped (core.kill_foreground).
+    _out = cpj_pause(CPJ, CPJ_TP, CPJ_SID, lambda: state.add_interrupted(CPJ_SID, [{
+        "command": f"curl -u ops:{CPJ_INT} https://deploy.example/run", "tool_use_id": "cpj-k1",
+        "at": state.now_iso(), "processes": 1}]))
+    CPJ_FILE = CPJ / ".work" / "deploy" / "checkpoint.json"
+    _txt = CPJ_FILE.read_text() if CPJ_FILE.exists() else ""
+    _cp = jread(CPJ_FILE)
+    check("a pause writes checkpoint.json next to the session's tracker in the project",
+          lambda: denied(_out) and _cp.get("session_id") == CPJ_SID)
+    check("...with no secret in it: not the last calls' commands, an MCP call's input, the jobs' commands or the "
+          "interrupted ones (raw or JSON-escaped)",
+          lambda: _txt and not any(v in _txt or json.dumps(v)[1:-1] in _txt for v in CPJ_ALL))
+    check("...and what a resume reads stays: the calls, the job and the interrupted command, scrubbed",
+          lambda: [c["input"] for c in _cp["last_tool_calls"]][-3:-1] == ["export GH_TOKEN=***",
+                                                                           "mysql -u admin -p*** prod < m.sql"]
+          and _cp["last_tool_calls"][-2]["tool"] == "Bash"
+          and any(j.get("name") == "cpj-deploy" and j.get("command") == "API_TOKEN=*** sleep 30" and j.get("state")
+                  for j in _cp["jobs"])
+          and not any("log" in j for j in _cp["jobs"])
+          and _cp["interrupted"][0]["command"] == "curl -u ops:*** https://deploy.example/run"
+          and _cp["interrupted"][0]["tool_use_id"] == "cpj-k1")
+    check("the hook put the work folder into the clone's exclude file (git rev-parse --git-path info/exclude): "
+          "git ignores the checkpoint, and `git status` doesn't list it",
+          lambda: ".work/" in excl(CPJ).splitlines()
+          and subprocess.run(["git", "-C", str(CPJ), "check-ignore", "-q", str(CPJ_FILE)], env=GIT_ENV).returncode == 0
+          and ".work" not in subprocess.run(["git", "-C", str(CPJ), "status", "--porcelain"], capture_output=True,
+                                            text=True, env=GIT_ENV).stdout)
+    time.sleep(1.1)
+    hook("Stop", {"session_id": CPJ_SID, "transcript_path": str(CPJ_TP), "cwd": str(CPJ), "stop_hook_active": False},
+         CPJ_ENV)
+    check("...once: a refreshed checkpoint (Stop while paused) and another look add no second line",
+          lambda: jread(CPJ_FILE).get("written_at") != _cp.get("written_at")
+          and core.ensure_excluded(CPJ_FILE) == "" and excl(CPJ).splitlines().count(".work/") == 1)
+    _resumed = hook("UserPromptSubmit", {"session_id": CPJ_SID, "transcript_path": str(CPJ_TP), "cwd": str(CPJ),
+                                         "prompt": "go on"}, CPJ_ENV)
+    check("the resume context reads the scrubbed checkpoint (the interrupted command, the last calls)",
+          lambda: "curl -u ops:***" in ctx(_resumed) and "mysql -u admin -p***" in ctx(_resumed)
+          and not any(v in ctx(_resumed) for v in CPJ_ALL))
+    if _cpj_job.get("ok"):
+        jobs.stop(_cpj_job["job"]["id"], "test")
+    CPT_SID = "sess-cpjson-7777-8888"
+    CPT, CPT_TP = cpj_project("cpjson-tracked", CPT_SID, tracked=True)
+    _before = excl(CPT)
+    cpj_pause(CPT, CPT_TP, CPT_SID)
+    check("a repository that commits its trackers: the checkpoint is written, the exclude file left alone",
+          lambda: (CPT / ".work" / "deploy" / "checkpoint.json").exists() and excl(CPT) == _before
+          and ".work/" not in excl(CPT))
+    for _s in (CPJ_SID, CPT_SID):
+        state.clear_paused(_s)
+
 # --- the journal (PLAN-v4 phase 2): its own file, sharing this suite's helpers ----------
 print("the journal (tests/journal_tests.py):")
 exec(compile((ROOT / "tests" / "journal_tests.py").read_text(), str(ROOT / "tests" / "journal_tests.py"), "exec"))
@@ -3297,6 +3432,10 @@ exec(compile((ROOT / "tests" / "gateway_tests.py").read_text(), str(ROOT / "test
 print("hosts, authorizations and pause retries (tests/hosts_authz_tests.py):")
 exec(compile((ROOT / "tests" / "hosts_authz_tests.py").read_text(), str(ROOT / "tests" / "hosts_authz_tests.py"),
              "exec"))
+
+# --- the user-facing fixes of the 0.7.3 review: last (it uses only this file's helpers) ---------
+print("the spool without a runtime, status, crash notice, forget/purge, trackers off (tests/ux_tests.py):")
+exec(compile((ROOT / "tests" / "ux_tests.py").read_text(), str(ROOT / "tests" / "ux_tests.py"), "exec"))
 
 check("hermetic, at the end too: no job of this run had an env file outside the temp dir",
       all(not j.get("gateway_env_file") or j["gateway_env_file"].startswith(str(TMP))

@@ -39,6 +39,14 @@ This session's id: {sid}
 Tracker template:
 {template}"""
 
+# CHECKPOINT_TRACKERS=off: the journal still records everything; nothing
+# asks for trackers.
+SESSION_NOTE_NO_TRACKERS = """\
+checkpoint is on (trackers off). Work so that you can be paused at any tool call and resumed later, possibly in a new session:
+- Anything likely to run more than ~2 minutes goes through the checkpoint job_start tool (it survives pauses and new sessions), with a redo_hint.
+- If a tool call is denied with "Paused by the user", don't start new work: end your turn with one line saying you're paused.
+This session's id: {sid}"""
+
 
 def _emit(obj: dict[str, Any] | None) -> None:
     if obj:
@@ -161,7 +169,10 @@ def session_main() -> int:
             # A new Claude process: the old one's queue, and the echoes the
             # queued pause commands were waiting for, are gone with it.
             state.drop_queued(sid)
-        text = SESSION_NOTE.format(sid=sid, work=state.work_dir_name(), template=tracker.TEMPLATE)
+        if state.trackers_on():
+            text = SESSION_NOTE.format(sid=sid, work=state.work_dir_name(), template=tracker.TEMPLATE)
+        else:
+            text = SESSION_NOTE_NO_TRACKERS.format(sid=sid)
         if state.is_paused(sid):
             text += "\nThis session is PAUSED. The user's next message resumes it."
         cwd = payload.get("cwd") or ""
@@ -185,6 +196,13 @@ def session_main() -> int:
         if warn:
             text += "\n" + warn
             extra["systemMessage"] = "checkpoint: " + warn
+        try:
+            crash = _crash_notice(sid, payload.get("source") or "", payload.get("cwd") or "")
+        except Exception as e:  # noqa: BLE001
+            print(f"checkpoint: the crash notice failed: {e}", file=sys.stderr)
+            crash = ""
+        if crash:
+            extra["systemMessage"] = (extra["systemMessage"] + " " + crash) if extra.get("systemMessage") else crash
         news = _degraded_news()
         if news:
             text += ("\ncheckpoint's gate ran degraded (without its Python half) since the last session "
@@ -277,22 +295,26 @@ def _journal_note(sid: str, source: str, cwd: str) -> str:
         # anything still open), and nothing when nothing did (the reconcile
         # record says it was checked).
         from . import recovery
-        clean = source == "resume" and not state.is_paused(sid) and summary.previous_run_ended(task, sid)
-        r = recovery.reconcile(task, sid, cwd=cwd)
-        recovery.record(sid, r, f"session start ({source}{', after a clean exit' if clean else ''})")
-        if clean:
-            if not r.check_first():
-                return ""
-            return ("\nThis session continues checkpoint task " + task + " after a clean exit. Reconciled with the "
-                    "journal, the files and the process table; what changed since its last run:\n<checkpoint-recovery>\n"
-                    + r.text(limit=SESSION_LIMIT) + "\n</checkpoint-recovery>")
-        paused = (" This session is PAUSED: don't act on the checks yet; the user's next message resumes it."
-                  if state.is_paused(sid) else "")
-        return ("\nThis session continues checkpoint task " + task + "." + paused + " Reconciled with the "
-                "journal, the files and the process table, then its recovery summary (observed facts and marked "
-                "inferences):\n<checkpoint-recovery>\n"
-                + r.text(lambda n: summary.build(task, limit=n, cwd=cwd).text, limit=SESSION_LIMIT, summary_max=3500)
-                + "\n</checkpoint-recovery>")
+        with sanitize.remembered():     # the summary below scrubs the commands reconcile scrubbed
+            was_paused = state.is_paused(sid)
+            r = recovery.reconcile(task, sid, cwd=cwd)
+            # (from the journal reconcile read: reconciling writes nothing)
+            clean = source == "resume" and not was_paused and summary.previous_run_ended(task, sid, view=r.view)
+            recovery.record(sid, r, f"session start ({source}{', after a clean exit' if clean else ''})")
+            if clean:
+                if not r.check_first():
+                    return ""
+                return ("\nThis session continues checkpoint task " + task + " after a clean exit. Reconciled with "
+                        "the journal, the files and the process table; what changed since its last run:\n"
+                        "<checkpoint-recovery>\n" + r.text(limit=SESSION_LIMIT) + "\n</checkpoint-recovery>")
+            paused = (" This session is PAUSED: don't act on the checks yet; the user's next message resumes it."
+                      if state.is_paused(sid) else "")
+            return ("\nThis session continues checkpoint task " + task + "." + paused + " Reconciled with the "
+                    "journal, the files and the process table, then its recovery summary (observed facts and marked "
+                    "inferences):\n<checkpoint-recovery>\n"
+                    + r.text(lambda n: summary.build(task, limit=n, cwd=cwd).text, limit=SESSION_LIMIT,
+                             summary_max=3500)
+                    + "\n</checkpoint-recovery>")
     if source not in ("startup", "clear"):
         return ""
     lines = []
@@ -312,6 +334,29 @@ def _journal_note(sid: str, source: str, cwd: str) -> str:
             + ". To continue one: prefer its original session (`claude --resume <id>`, its whole conversation), or "
               "/check:resume <task id> here (an explicit continuation: reconciled, with the recovery summary). This "
               "session's task: " + task + ".")
+
+
+CRASH_NOTICE_DAYS = 7   # an interrupted task is shown to the person at a session start this long
+
+
+def _crash_notice(sid: str, source: str, cwd: str) -> str:
+    """One line for the person (the context's task list reaches only the
+    model) at a fresh start in a project whose newest unfinished task was
+    interrupted (no clean end, its Claude process gone) in the last
+    CRASH_NOTICE_DAYS: the task, its goal, and both ways to continue it."""
+    if source not in ("startup", "clear") or not cwd:
+        return ""
+    own = state.load_session(sid).get("task_id") or ""
+    since = time.time() - CRASH_NOTICE_DAYS * 86400
+    hits = [m for m in core.unfinished_tasks(cwd, own=own) if m["interrupted"]
+            and float(m.get("updated") or 0) >= since]
+    if not hits:
+        return ""
+    m = hits[0]
+    goal = sanitize.clip(" ".join(str(m.get("goal") or "").split()), 60)
+    via = f"`claude --resume {m['last_session']}` continues its session, or " if m.get("last_session") else ""
+    more = f" ({len(hits) - 1} more: /check:status)" if len(hits) > 1 else ""
+    return f'checkpoint: task {m["task"]} was interrupted ("{goal}"): {via}/check:resume {m["task"]} picks it up here.{more}'
 
 
 def _degraded_news() -> list[str]:
@@ -410,8 +455,9 @@ def _handle_prompt(sid: str, prompt: str, payload: dict[str, Any]) -> dict[str, 
             result = core.pause(sid, args, by="keyword" if plain else "command", echo=echo)
             text = f"<checkpoint-result>{result}</checkpoint-result>"
             if plain and state.is_paused(sid):
-                text += ("\nThe user typed 'pause': don't start anything new. Bring the tracker "
-                         "up to date, then end your turn with one line saying you're paused.")
+                text += ("\nThe user typed 'pause': don't start anything new. "
+                         + ("Bring the tracker up to date, then end" if state.trackers_on() else "End")
+                         + " your turn with one line saying you're paused.")
             return _ctx("UserPromptSubmit", text)
         if name == "status":
             return _ctx("UserPromptSubmit", f"<checkpoint-result>{core.status_text(sid)}</checkpoint-result>")
@@ -441,6 +487,10 @@ def _handle_prompt(sid: str, prompt: str, payload: dict[str, Any]) -> dict[str, 
             return _ctx("UserPromptSubmit", f"<checkpoint-result>{core.complete(sid, args)}</checkpoint-result>")
         if name == "export":
             return _ctx("UserPromptSubmit", f"<checkpoint-result>{_export(sid, cwd, args)}</checkpoint-result>")
+        if name == "forget":
+            from . import purge
+            _ok, msg = purge.forget(args[0] if args else "", sid=sid, cwd=cwd)
+            return _ctx("UserPromptSubmit", f"<checkpoint-result>{msg}</checkpoint-result>")
         return None  # help: the command's own prompt answers it
     if state.is_paused(sid) or state.resume_pending(sid):
         return _ctx("UserPromptSubmit", core.resume_here(sid, dirs, prompt=prompt),
@@ -453,14 +503,15 @@ def _export(sid: str, cwd: str, args: list[str]) -> str:
     from . import recovery
     ref = args[0] if args and not args[0].startswith(("/", "~", ".")) else ""
     out = next((a for a in args if a.startswith(("/", "~", "."))), "")
-    task = core.find_task(ref, cwd) if ref else (state.load_session(sid).get("task_id") or "")
+    task = core.find_task(ref, cwd, sid) if ref else (state.load_session(sid).get("task_id") or "")
     if sid:
         capture.ingest(sid)
     if not task:
         return f"No task matches '{ref}'." if ref else "This session has no task journal yet."
     ok, where = recovery.export(task, out)
     return (f"Exported task {task} to {where} (0600): its summary, checkpoints, a journal excerpt and references, "
-            "every string sanitized again; no file contents, transcripts or credentials." if ok else
+            "every string sanitized again; no file contents or transcripts. Scrubbing is pattern-based: review the "
+            "file before sharing it." if ok else
             f"Export of task {task} failed: {where}")
 
 
@@ -476,7 +527,7 @@ def _resume(sid: str, cwd: str, args: list[str], dirs: list[str]) -> str:
     if args:
         # What it names first: a reference that matches nothing (a typo)
         # must leave a paused session paused, unreconciled and unrecorded.
-        found = core.resolve_ref(cwd, args[0])
+        found = core.resolve_ref(cwd, args[0], sid)
         paused = state.is_paused(sid) or state.resume_pending(sid)
         if not found[0] and not found[1]:
             msg = core.no_match(cwd, args[0])
@@ -644,6 +695,9 @@ def gate(payload: dict[str, Any]) -> dict[str, Any] | None:
     if payload.get("agent_id"):
         reason = ("Paused by the user (checkpoint). Don't call more tools: stop here and "
                   "return a short report of what you did and what is left.")
+    elif not state.trackers_on():
+        reason = ("Paused by the user (checkpoint). Don't start new work: end your turn with one line saying "
+                  "you're paused.")
     elif t:
         reason = (f"Paused by the user (checkpoint). Don't start new work. Update {t['path']} "
                   "(Now, Jobs, Resume notes; Write/Edit to it are allowed), then end your "
@@ -714,7 +768,7 @@ def post(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 def _post(sid: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     state.touch(state.p("count", state.safe_id(sid)), "0")
-    if state.is_paused(sid):
+    if state.is_paused(sid) or not state.trackers_on():
         return None
     cwd = (_dirs(payload) or [""])[0]
     n = state.nudge_every()
@@ -753,7 +807,7 @@ def _stop(sid: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         core.write_checkpoint(sid, dirs=_dirs(payload))
         state.update_session(sid, stopped_paused_at=state.now_iso())
         return None
-    if payload.get("stop_hook_active"):
+    if payload.get("stop_hook_active") or not state.trackers_on():
         return None
     t = _tracker_for(payload, sid)
     if not t or not t["in_progress"]:

@@ -2,7 +2,7 @@
 # constants only). The caller sets $root (the plugin folder) and $st
 # (CHECKPOINT_HOME, as state.home()).
 #
-# The runtime (docs/ARCHITECTURE.md, "Runtime"): a pixi env built from a copy
+# The runtime (docs/dev/ARCHITECTURE.md, "The runtime"): a pixi env built from a copy
 # of pixi.toml + pixi.lock with `pixi install --locked`, in
 #   $DATA/envs/<first 12 hex digits of sha256(pixi.lock)>/
 #     pixi.toml, pixi.lock, install.log, .pixi/envs/default/, .ready, .warm, .used
@@ -16,7 +16,7 @@
 
 CK_ENV_KEEP_DAYS=7          # an env unused this long is removed (state.ENV_KEEP_DAYS)
 CK_PIXI_MIN=0.68.0          # pixi.toml requires-pixi; oldest pixi that reads pixi.lock (format 7)
-CK_PIXI_TESTED=0.82.0       # newest pixi `pixi install --locked` was tried with (docs/ARCHITECTURE.md)
+CK_PIXI_TESTED=0.82.0       # newest pixi `pixi install --locked` was tried with (docs/dev/ARCHITECTURE.md)
 
 # The user's home from the password database (as state.gateway_env_path()):
 # Claude Code may run with HOME pointing elsewhere.
@@ -335,14 +335,69 @@ ck_fail_line() {
 # small is one write() under sh, bash and dash (measured: 1 KiB lines from 16
 # writers at once never mixed; 1025 bytes did), so the index stays whole.
 # Python reads a file only once its index line exists. Line:
-#   1 <TAB> EVENT <TAB> FILE <TAB> BYTES [<TAB> h=HASH] [<TAB> cut=BYTES]
+#   1 <TAB> EVENT <TAB> FILE <TAB> BYTES [<TAB> h=HASH] [<TAB> cut=BYTES] [<TAB> meta=1]
 CK_SPOOL_MAX=262144         # payload bytes kept per record (capture.SPOOL_MAX)
 CK_HASH_MAX=16777216        # files hashed for before/after (capture.HASH_MAX)
 CK_SPOOL_SAY=               # set when a record couldn't be written: the hook says so
+# A session's spool holds at most CK_SPOOL_KEEP_COUNT records and about
+# CK_SPOOL_KEEP_BYTES stored bytes (capture.SPOOL_KEEP_COUNT, SPOOL_KEEP_BYTES;
+# CHECKPOINT_SPOOL_KEEP_COUNT and _BYTES make them small for tests): past
+# either, the oldest are dropped down to half, with a recording.gap record
+# (ck_spool_trim). A spool nothing was written to for CK_SPOOL_KEEP_DAYS whose
+# session's Claude process is gone is removed at a session start
+# (ck_spool_prune; capture.SPOOL_KEEP_DAYS).
+CK_SPOOL_KEEP_COUNT=10000
+CK_SPOOL_KEEP_BYTES=52428800
+CK_SPOOL_KEEP_DAYS=7
+CK_BODY_BUILD_MIN=60        # a build running longer no longer counts as a runtime on its way (ck_body)
+# What a record without its contents keeps (ck_spool, while ck_body says no):
+# these top-level members, the hooks' and the mod's (names, ids, decisions).
+CK_META_KEYS='|session_id|transcript_path|cwd|hook_event_name|permission_mode|tool_name|tool_use_id|agent_id|agent_type|prompt_id|source|notification_type|trigger|turnId|tool|decision|answered|phase|'
+CK_BODY_SET=                # ck_body ran in this process (CK_BODY holds its answer)
+CK_TRIMMING=                # ck_spool_trim runs: its own record doesn't trim again
 
-# ck_spool SESSION EVENT [EXTRA]: spool $input (the hook payload).
+# Whether payloads are kept whole: sets CK_BODY (once per process) to '' when
+# they are, else to why not. A payload waits in the spool, unscrubbed, for
+# Python to turn it into journal records, so it is kept only while Python is
+# there or on its way: a runtime is ready (or an update's older env runs), a
+# build has run for less than CK_BODY_BUILD_MIN minutes, or none was tried
+# yet (the session start starts one). Otherwise (no pixi, a failed build, a
+# build hung for an hour) a record keeps the event, the tool, the ids, the
+# session's paths and the payload's size, never its contents. With a runtime
+# ready it costs no process (rt/<session> read with `read`, two file tests).
+ck_body() {
+    [ -n "$CK_BODY_SET" ] && return 0
+    CK_BODY_SET=1
+    CK_BODY=
+    [ -n "${CHECKPOINT_PYTHON:-}" ] && return 0
+    if [ -z "${ENVD:-}" ] && [ -z "${CHECKPOINT_ENVD:-}" ] && [ -n "$1" ] && [ -f "$st/rt/$1" ]; then
+        { IFS= read -r CHECKPOINT_ENVD < "$st/rt/$1"; } 2>/dev/null
+    fi
+    ck_env
+    ck_ready && return 0
+    if [ -d "$ENVD.building" ] &&
+        [ -n "$(find "$ENVD.building" -prune -mmin -"$CK_BODY_BUILD_MIN" 2>/dev/null)" ]; then
+        return 0
+    fi
+    [ -n "$(ck_older)" ] && return 0
+    if [ -d "$ENVD.building" ]; then
+        CK_BODY="no runtime: its setup has run for over an hour"
+    elif [ -f "$ENVD/install.log" ]; then
+        _ckl=
+        { IFS= read -r _ckl < "$ENVD/install.log"; } 2>/dev/null
+        case $_ckl in
+        'checkpoint: pixi not found'*) CK_BODY="no runtime: pixi not found" ;;
+        *) CK_BODY="no runtime: its setup failed" ;;
+        esac
+    fi
+    return 0
+}
+
+# ck_spool SESSION EVENT [EXTRA]: spool $input (the hook payload); while
+# ck_body says no, only what the payload says about itself (meta=1).
 ck_spool() {
     [ -n "$1" ] || return 0
+    ck_body "$1" # first: what it calls (ck_env, ck_older) sets _ck* variables of its own
     _cks="$st/spool/$1"
     if [ ! -d "$_cks" ]; then
         mkdir -p "$_cks" 2>/dev/null || { ck_spool_failed "$1" "can't create $_cks"; return 1; }
@@ -350,6 +405,24 @@ ck_spool() {
     CK_SPOOL_N=$((${CK_SPOOL_N:-0} + 1)) # records of this process (one per hook; env.sh spool too)
     _ckn="$$.$CK_SPOOL_N"
     _ckb=${#input}
+    _ckx=
+    if [ -n "$CK_BODY" ] && [ "$2" != recording.gap ]; then
+        # The payload's top-level string members named in CK_META_KEYS (the
+        # payload cut into JSON tokens, strings whole, so nothing nested in
+        # tool_input or a result is ever taken for one; a value over 300
+        # bytes is left out) and its size: no tool input or result, prompt or
+        # message. Our recording.gap records stay whole.
+        _ckp=$(printf '%s' "$input" | grep -oE '"([^"\\]|\\.)*"|[][{}:,]' | awk -v keys="$CK_META_KEYS" '
+            $0 == "{" || $0 == "[" { d++; if (d == 1) want = 1; if (d == 2) hk = 0; next }
+            $0 == "}" || $0 == "]" { d--; next }
+            d != 1 { next }
+            $0 == "," { want = 1; hk = 0; next }
+            $0 == ":" { next }
+            want { k = substr($0, 2, length($0) - 2); want = 0; hk = 1; next }
+            hk { hk = 0; if (length($0) <= 302 && index(keys, "|" k "|")) printf "\"%s\":%s,", k, $0 }')
+        _ckp="{$_ckp\"checkpoint_meta\":{\"bytes\":$_ckb,\"why\":\"$CK_BODY\"}}"
+        _ckx="	meta=1"
+    fi
     _ckf=
     _ckt=0
     set -C
@@ -359,7 +432,9 @@ ck_spool() {
             _ckn="$$.$CK_SPOOL_N.$_ckt"
             continue
         fi
-        if [ "$_ckb" -gt "$CK_SPOOL_MAX" ]; then
+        if [ -n "$_ckx" ]; then
+            { printf '%s\n' "$_ckp" > "$_cks/$_ckn.ev"; } 2>/dev/null && _ckf=$_ckn.ev
+        elif [ "$_ckb" -gt "$CK_SPOOL_MAX" ] && [ "$2" != recording.gap ]; then
             { printf '%s' "$input" | head -c "$CK_SPOOL_MAX" > "$_cks/$_ckn.ev"; } 2>/dev/null && _ckf=$_ckn.ev
         else
             { printf '%s\n' "$input" > "$_cks/$_ckn.ev"; } 2>/dev/null && _ckf=$_ckn.ev
@@ -373,12 +448,181 @@ ck_spool() {
         return 1
     fi
     _ckc=
-    [ "$_ckb" -gt "$CK_SPOOL_MAX" ] && _ckc="	cut=$_ckb"
-    if ! printf '1\t%s\t%s\t%s%s%s\n' "$2" "$_ckf" "$_ckb" "${3:+	$3}" "$_ckc" >> "$_cks/index" 2>/dev/null; then
+    if [ -n "$_ckx" ]; then
+        _ckw=$((${#_ckp} + 1))
+    elif [ "$_ckb" -gt "$CK_SPOOL_MAX" ] && [ "$2" != recording.gap ]; then
+        _ckc="	cut=$_ckb"
+        _ckw=$CK_SPOOL_MAX
+    else
+        _ckw=$((_ckb + 1))
+    fi
+    if ! printf '1\t%s\t%s\t%s%s%s%s\n' "$2" "$_ckf" "$_ckb" "${3:+	$3}" "$_ckc" "$_ckx" >> "$_cks/index" 2>/dev/null; then
         ck_spool_failed "$1" "can't append to $_cks/index (disk full?)"
         return 1
     fi
+    # The spool's size (records, stored bytes) in spool/<session>/.size, kept
+    # without a process: read, add, write. Hooks at once can lose an update
+    # (close enough for a cap); Python writes what is left after each ingest.
+    # A read racing a write can see a torn line ("2099 06216"): leading zeros
+    # go (sh arithmetic reads 078 as octal and kills the hook, before the
+    # paused deny), anything else not a number counts as 0.
+    _ckq=
+    _ckz=
+    { read -r _ckq _ckz < "$_cks/.size"; } 2>/dev/null
+    case $_ckq in '' | *[!0-9]*) _ckq=0 ;; *) _ckq=${_ckq#"${_ckq%%[!0]*}"} ;; esac
+    case $_ckz in '' | *[!0-9]*) _ckz=0 ;; *) _ckz=${_ckz#"${_ckz%%[!0]*}"} ;; esac
+    _ckq=$((${_ckq:-0} + 1))
+    _ckz=$((${_ckz:-0} + _ckw))
+    printf '%s %s\n' "$_ckq" "$_ckz" 2>/dev/null > "$_cks/.size"
+    if [ -z "$CK_TRIMMING" ]; then
+        _ckm=${CHECKPOINT_SPOOL_KEEP_COUNT:-$CK_SPOOL_KEEP_COUNT}
+        _ckmb=${CHECKPOINT_SPOOL_KEEP_BYTES:-$CK_SPOOL_KEEP_BYTES}
+        case $_ckm in '' | *[!0-9]* | 0) _ckm=$CK_SPOOL_KEEP_COUNT ;; esac
+        case $_ckmb in '' | *[!0-9]* | 0) _ckmb=$CK_SPOOL_KEEP_BYTES ;; esac
+        if [ "$_ckq" -gt "$_ckm" ] || [ "$_ckz" -gt "$_ckmb" ]; then
+            # The count can be torn (it read "152482 4993" under 16 writers):
+            # counted for real before anything is dropped.
+            ck_spool_count "$1"
+            if [ "$_ckq" -gt "$_ckm" ] || [ "$_ckz" -gt "$_ckmb" ]; then
+                ck_spool_trim "$1"
+            fi
+        fi
+    fi
     [ -e "$st/spool-errors/$1" ] && ck_spool_recovered "$1"
+    return 0
+}
+
+# The spool's real size (its payload files and their bytes, as capture's
+# _write_size counts them) into _ckq and _ckz and spool/<session>/.size: when
+# the running count says the cap is passed (two processes, then; never on the
+# common path).
+ck_spool_count() {
+    _ckd="$st/spool/$1"
+    set -- "$_ckd"/*.ev
+    _ckq=$#
+    [ -e "$1" ] || _ckq=0
+    _ckz=$(cd "$_ckd" 2>/dev/null && ls -ln 2>/dev/null | awk '$NF ~ /\.ev$/ { s += $5 } END { printf "%d", s }')
+    case $_ckz in '' | *[!0-9]*) _ckz=0 ;; esac
+    printf '%s %s\n' "$_ckq" "$_ckz" 2>/dev/null > "$_ckd/.size"
+}
+
+# The session's spool passed its cap (called by ck_spool, which set _ckq and
+# _ckz to its size, _ckm and _ckmb to the caps): drop the oldest payloads, in
+# index order, until it holds half of each. A recording.gap record naming
+# them goes in first (Python counts as dropped the ones it then finds gone),
+# then they are removed; our own recording.gap records stay. One trimmer at
+# a time (spool/<session>/.trim; one a killed hook left is broken after a
+# minute). Its cost follows what it drops, not the session's whole history:
+# with no runtime (nothing else rotates the index) the index is moved to
+# index.s<n> after each trim (Python reads those first, capture.py), and a
+# rotated index read to its end (everything it names dropped or ingested) is
+# skipped from then on (spool/<session>/.trimdone: the highest such n).
+ck_spool_trim() {
+    _ckd="$st/spool/$1"
+    if ! mkdir "$_ckd/.trim" 2>/dev/null; then
+        [ -n "$(find "$_ckd/.trim" -prune -mmin +1 2>/dev/null)" ] || return 0
+        rm -rf "${_ckd:?}/.trim" 2>/dev/null
+        mkdir "$_ckd/.trim" 2>/dev/null || return 0
+    fi
+    CK_TRIMMING=1
+    _ckwc=$((_ckm / 2))
+    _ckwb=$((_ckmb / 2))
+    _ckdn=0
+    _ckdb=0
+    _ckhw=
+    { read -r _ckhw < "$_ckd/.trimdone"; } 2>/dev/null
+    case $_ckhw in '' | *[!0-9]*) _ckhw=0 ;; *) _ckhw=${_ckhw#"${_ckhw%%[!0]*}"} ;; esac
+    _ckhw=${_ckhw:-0}
+    _ckh0=$_ckhw
+    _ckhi=$_ckhw # the highest index.s<n> there is (or was: never reused below .trimdone)
+    _ckstop=
+    : > "$_ckd/.trim/list"
+    for _cki in "$_ckd"/index.* "$_ckd/index"; do
+        [ -f "$_cki" ] || continue
+        _ckg=
+        case ${_cki##*/} in
+        index.s[0-9]*)
+            _ckg=${_cki##*/index.s}
+            while :; do case $_ckg in 0?*) _ckg=${_ckg#0} ;; *) break ;; esac; done
+            case $_ckg in *[!0-9]*) _ckg= ;; esac
+            ;;
+        esac
+        if [ -n "$_ckg" ]; then
+            [ "$_ckg" -gt "$_ckhi" ] && _ckhi=$_ckg
+            [ "$_ckg" -le "$_ckhw" ] && continue
+        fi
+        [ -n "$_ckstop" ] && continue # (still counting the rotated ones' numbers)
+        while IFS='	' read -r _ckv _cke _ckf _ckb _ckr; do
+            if [ "$_ckq" -le "$_ckwc" ] && [ "$_ckz" -le "$_ckwb" ]; then
+                _ckstop=1
+                break
+            fi
+            case $_ckf in */* | '') continue ;; *.ev) ;; *) continue ;; esac
+            [ "$_cke" = recording.gap ] && continue
+            [ -e "$_ckd/$_ckf" ] || continue
+            case $_ckb in '' | *[!0-9]*) _ckb=0 ;; esac
+            case $_ckr in
+            *meta=1*) _ckw=512 ;;
+            *) if [ "$_ckb" -gt "$CK_SPOOL_MAX" ]; then _ckw=$CK_SPOOL_MAX; else _ckw=$((_ckb + 1)); fi ;;
+            esac
+            printf '%s\n' "$_ckf" >> "$_ckd/.trim/list"
+            _ckdn=$((_ckdn + 1))
+            _ckdb=$((_ckdb + _ckw))
+            _ckq=$((_ckq - 1))
+            _ckz=$((_ckz - _ckw))
+        done < "$_cki"
+        # Read to its end (and every index before it): nothing in it is left to drop.
+        [ -z "$_ckstop" ] && [ -n "$_ckg" ] && _ckhw=$_ckg
+    done
+    _ckstop=
+    if [ "$_ckdn" -gt 0 ]; then
+        _ckrq=$_ckq
+        _ckrz=$_ckz
+        _cksv=$input
+        input="{\"hook_event_name\":\"recording.gap\",\"session_id\":\"$1\",\"what\":\"dropped\",\"events\":$_ckdn,\"bytes\":$_ckdb,\"at\":\"$(ck_now)\",\"why\":\"over the spool's cap ($_ckm records or $_ckmb bytes)\",\"files\":[$(sed 's/.*/"&"/' "$_ckd/.trim/list" | paste -s -d , -)]}"
+        _ckgs=$((${#input} + 1))
+        ck_spool "$1" recording.gap
+        input=$_cksv
+        _ckd="$st/spool/$1" # (ck_spool's recovery path, ck_arm, uses _ckd too)
+        (cd "$_ckd" && xargs rm -f < .trim/list) 2>/dev/null
+        [ "$_ckrq" -lt 0 ] && _ckrq=0
+        [ "$_ckrz" -lt 0 ] && _ckrz=0
+        printf '%s %s\n' "$((_ckrq + 1))" "$((_ckrz + _ckgs))" 2>/dev/null > "$_ckd/.size"
+    else
+        # Nothing left to drop (only our own gap records): look again half a cap later.
+        printf '%s %s\n' "$_ckwc" "$_ckwb" 2>/dev/null > "$_ckd/.size"
+    fi
+    if [ -n "$CK_BODY" ] && [ -s "$_ckd/index" ]; then
+        # No runtime (ck_body): the index goes to the next index.s<n>.
+        _ckhi=$((_ckhi + 1))
+        mv -f "$_ckd/index" "$_ckd/$(printf 'index.s%06d' "$_ckhi")" 2>/dev/null
+    fi
+    [ "$_ckhw" != "$_ckh0" ] && printf '%s\n' "$_ckhw" 2>/dev/null > "$_ckd/.trimdone"
+    rm -rf "${_ckd:?}/.trim" 2>/dev/null
+    CK_TRIMMING=
+    return 0
+}
+
+# At a session start: remove the spools nothing was written to for
+# CK_SPOOL_KEEP_DAYS (a folder's time moves with every record: each is a new
+# file) whose session's Claude process is gone, also when no runtime will
+# ever ingest them (with one, the SessionStart hook's capture.ingest_dead has
+# had them first). ck_spool_prune SESSION: the one starting, never removed.
+ck_spool_prune() {
+    [ -d "$st/spool" ] || return 0
+    find "$st/spool" -mindepth 1 -maxdepth 1 -type d -mmin +$((CK_SPOOL_KEEP_DAYS * 1440)) 2>/dev/null |
+        while IFS= read -r _ckd; do
+            _ckn=${_ckd##*/}
+            [ "$_ckn" = "$1" ] && continue
+            _ckp=$(grep -o '"claude_pid": *[0-9][0-9]*' "$st/sessions/$_ckn.json" 2>/dev/null | grep -o '[0-9]*$')
+            if [ -n "$_ckp" ] && kill -0 "$_ckp" 2>/dev/null; then
+                # Its pid runs: still that session, unless ps says it is something else now.
+                case $(ps -o command= -p "$_ckp" 2>/dev/null) in
+                '' | *claude*) continue ;;
+                esac
+            fi
+            rm -rf "${_ckd:?}"
+        done
     return 0
 }
 

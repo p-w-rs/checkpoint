@@ -110,6 +110,9 @@ SECRETS = {
     "quoted nested": _rand(20), "prose": "Zq" + _rand(16) + "7",
     # A name that is the value of another (`note: PGPASSWORD: x`): 0.5.0.
     "chained yaml": _rand(20), "chained label": _rand(20),
+    # Command-line credentials only their program names (CK-SEC-2).
+    "mysql -p": _rand(18), "curl -u": _rand(18), "sshpass -p": _rand(18), "docker login -p": _rand(18),
+    "redis-cli -a": _rand(18), "sudo -S": _rand(18),
 }
 S = SECRETS
 CORPUS = [
@@ -135,6 +138,9 @@ CORPUS = [
     f"DB_PASS={S['db_pass']}", f"opts=a=1:TOKEN={S['nested']}", f"cmd=\"PGPASSWORD={S['quoted nested']} psql\"",
     f"the PGPASSWORD is {S['prose']}",
     f"note: REDISPASSWORD: {S['chained yaml']}", f"config: DB_PASSWORD = {S['chained label']}",
+    f"mysql -u root -p{S['mysql -p']} appdb < fixtures.sql", f"curl -u alice:{S['curl -u']} https://api.example.com/v1",
+    f"sshpass -p {S['sshpass -p']} ssh deploy@10.0.0.5 uptime", f"docker login -u bob -p {S['docker login -p']} r.io",
+    f"redis-cli -h cache -a {S['redis-cli -a']} ping", f"echo {S['sudo -S']} | sudo -S apt-get update",
 ]
 leaks = [i for i, t in enumerate(CORPUS) if any(v in sanitize.scrub(t) for v in SECRETS.values())]
 check(f"scrub(): no synthetic secret survives in {len(CORPUS)} contexts (tokens, URLs, headers, env, "
@@ -201,6 +207,376 @@ check("tool_response(Grep, WebFetch, an unknown tool): counts, paths, sizes, key
       "or a value", lambda: S["password"] not in json.dumps([_tr, _tw, _tm]) and _tr["paths"] == ["/h/.env"]
       and _tr["content_chars"] == len(_pg) and _tw["code"] == 200 and "k=v" not in json.dumps(_tw)
       and _tm == {"keys": ["path", "value"], "chars": len(json.dumps({"value": _pg, "path": "/h/.pgpass"}))})
+
+# Command-line credentials whose flag says nothing by itself (`-p`, `-a`,
+# `-u`, `-k`): masked after the program that reads them that way (CK-SEC-2).
+_PW = "Q" + _rand(14) + "7"
+
+
+def _cli_ok(cases):
+    """Every case loses the canary and keeps what is given as kept."""
+    outs = [(sanitize.scrub(c.replace("PW", _PW)), keep) for c, keep in cases]
+    return all(_PW not in o and keep in o for o, keep in outs)
+
+
+check("scrub(): mysql/mariadb/mysqladmin -p<pw> and -p <pw> lose the password; the database name stays",
+      lambda: _cli_ok([("mysql -u root -pPW appdb < fixtures.sql", "-p*** appdb < fixtures.sql"),
+                       ("mysql -uroot -p'PW' mydb", "-p'***' mydb"), ("mysql -u root -p PW prod", "-p *** prod"),
+                       ("mysqladmin -u root -pPW status", "-p*** status"),
+                       ("mariadb -h db -P 3306 -pPW app", "-P 3306 -p*** app"),
+                       ("docker exec -it db mysql -uroot -pPW app", "mysql -uroot -p*** app")]))
+check("scrub(): curl -u/--user user:pw (and --proxy-user, wget --user=) keep the user, lose the password",
+      lambda: _cli_ok([("curl -u alice:PW https://api.example.com/v1/items", "curl -u alice:*** https://api"),
+                       ("curl --user alice:PW https://x", "--user alice:***"), ("curl --user=alice:PW x", "--user=alice:***"),
+                       ("curl -ualice:PW x", "-ualice:***"), ("curl -U proxy:PW -x p:3128 x", "-U proxy:***"),
+                       ("wget --user=alice:PW https://x", "--user=alice:***")]))
+check("scrub(): sshpass -p (attached or not) and SSHPASS= lose the password; ssh's own -p stays",
+      lambda: _cli_ok([("sshpass -p PW ssh -p 2222 deploy@10.0.0.5 uptime", "sshpass -p *** ssh -p 2222 deploy@"),
+                       ("sshpass -p'PW' scp -P 22 a b:", "sshpass -p'***' scp -P 22"),
+                       ("SSHPASS=PW sshpass -e ssh h", "SSHPASS=*** sshpass -e")]))
+check("scrub(): docker/podman/helm/nerdctl/az login -p/--password lose the password",
+      lambda: _cli_ok([("docker login -u bob -p PW registry.example.com", "-u bob -p *** registry.example.com"),
+                       ("podman login -pPW -u x q.io", "-p*** -u x"), ("helm registry login r.io -u x -p PW", "-p ***"),
+                       ("nerdctl login --password PW r", "--password ***"), ("az login -u a@b.c -p PW", "-u a@b.c -p ***")]))
+check("scrub(): redis-cli -a, htpasswd -b, openssl -k / -K / -pass pass: lose the password",
+      lambda: _cli_ok([("redis-cli -h h -p 6379 -a PW ping", "-p 6379 -a *** ping"),
+                       ("htpasswd -b .htpasswd alice PW", "htpasswd -b .htpasswd alice ***"),
+                       ("htpasswd -nbB alice PW", "-nbB alice ***"),
+                       ("openssl enc -aes-256-cbc -k PW -in a -out b", "-k *** -in a"),
+                       ("openssl enc -aes-256-cbc -K 0011PW -iv 00", "-K *** -iv 00"),
+                       ("openssl pkcs12 -export -passout pass:PW -out x.p12", "pass:*** -out x.p12")]))
+check("scrub(): what echo/printf pipe into sudo -S (or --password-stdin, chpasswd) and sudo -S <<< lose it",
+      lambda: _cli_ok([("echo PW | sudo -S apt-get update", "echo *** | sudo -S apt-get update"),
+                       ("echo 'PW' | sudo -u root -S ls", "| sudo -u root -S ls"),
+                       ("step 2: echo PW | sudo -S true", "step 2: echo *** | sudo -S true"),
+                       ("printf '%s\\n' PW | sudo -S -k true", "| sudo -S -k true"), ("sudo -S true <<< PW", "<<< ***"),
+                       ("echo PW | docker login -u x --password-stdin", "echo *** | docker login"),
+                       ("echo 'u:PW' | sudo chpasswd", "echo *** | sudo chpasswd")]))
+# Its last character drawn apart, so every run checks each ending (a random one ended in "-" now and then and
+# the bare form leaked: round 2's flake, 1 run in ~75).
+_bots = ["123456789:AA" + _rand(32, _string.ascii_letters + _string.digits + "_-") + _end for _end in "-_x7"]
+_bot = _bots[2]
+check("scrub(): a Telegram bot token (in its API URL, or bare) is masked; the URL's host and method stay",
+      lambda: _bot not in sanitize.scrub(f"curl https://api.telegram.org/bot{_bot}/sendMessage")
+      and "api.telegram.org/bot123456789:***/sendMessage" in sanitize.scrub(f"curl https://api.telegram.org/bot{_bot}/sendMessage")
+      and _bot.split(":")[1] not in sanitize.scrub(f"notify {_bot}"))
+check("...also a bare token whose last character is a dash or an underscore (no word boundary after it), at the "
+      "end of the text or before a space",
+      lambda: all(b.split(":")[1] not in sanitize.scrub(f"notify {b}") and b.split(":")[1] not in sanitize.scrub(f"{b} sent")
+                  for b in _bots))
+_near = ["ssh -p 2222 host", "scp -P 22 a host:b", "mkdir -p a/b", "cp -p a b", "git log -p -3", "tar -czpf x.tgz d",
+         "pytest -k 'test_x and not slow' -q", "sort -k2 f", "docker run -p 8080:80 nginx", "redis-cli -p 6379 ping",
+         "curl -u alice https://x", "echo hi | sudo tee /x", "echo y | sudo pacman -S foo", "mysql -h db -P 3306 app",
+         "openssl rsa -passin env:PW -in k", "htpasswd -D f u", "wget -U 'Mozilla/5.0 rv:109.0' x",
+         "git commit -m 'fix mysql -p parsing'", "rsync -avzP a b:"]
+check("...near misses stay untouched (ssh -p, scp -P, mkdir -p, cp -p, git log -p, tar -czpf, pytest -k, docker run -p, "
+      "sudo pacman -S ...)", lambda: all(sanitize.scrub(c) == c for c in _near))
+# After a separator (round 2's must-fix: each later segment's words were
+# placed at the wrong offsets, so the canary stayed and the command broke).
+_after_sep = [("cd /srv && mysql -u root -pPW app", "cd /srv && mysql -u root -p*** app"),
+              ("set -e; docker login -u bob -p PW r.io && docker push r.io/x",
+               "set -e; docker login -u bob -p *** r.io && docker push r.io/x"),
+              ("echo start && echo PW | sudo -S true", "echo start && echo *** | sudo -S true"),
+              ("ls -la | mysql -pPW db", "ls -la | mysql -p*** db"), ("(cd x && mysql -pPW)", "(cd x && mysql -p***)"),
+              ("export A=1\nmysql -pPW db", "export A=1\nmysql -p*** db"),
+              ("x=1; sshpass -p 'PW' ls", "x=1; sshpass -p '***' ls"),
+              ("cd ~/p; curl -u alice:PW https://x/v1 && git push", "cd ~/p; curl -u alice:*** https://x/v1 && git push")]
+check("scrub(): a credential after a separator (&&, ;, |, (, a newline) is masked in place: exactly the command "
+      "back with only the value masked",
+      lambda: all(sanitize.scrub(c.replace("PW", _PW)) == want for c, want in _after_sep))
+_push = sanitize.tool_input("Bash", {"command": f"cd /home/u/p && docker login -u bob -p {_PW} reg.io && docker push "
+                                                f"reg.io/app:1"})
+check("...so the journaled command of a scrubbed login-and-push is still an external effect (deploy) for 'Check first'",
+      lambda: _PW not in _push["command"] and __import__("checkpoint.recovery").recovery.external_effect(
+          "Bash", _push) == "deploy")
+check("scrub(): a command line quoted inside another (ssh host '...', sh -c, bash -lc, docker exec ... sh -c, "
+      "kubectl exec -- bash -c, su -c, eval, nested) loses its credentials; the rest stays",
+      lambda: _cli_ok([("ssh host 'mysql -u root -pPW app'", "ssh host 'mysql -u root -p*** app'"),
+                       ('ssh -p 2222 -i k u@h "cd /srv && mysql -pPW app"', 'ssh -p 2222 -i k u@h "cd /srv && mysql -p*** app"'),
+                       ('docker exec db sh -c "mysql -uroot -pPW app"', 'docker exec db sh -c "mysql -uroot -p*** app"'),
+                       ('bash -c "mysql -pPW"', 'bash -c "mysql -p***"'),
+                       ("bash -lc 'echo PW | sudo -S true'", "bash -lc 'echo *** | sudo -S true'"),
+                       ("kubectl exec -it pod -- bash -c 'curl -u a:PW x'", "bash -c 'curl -u a:*** x'"),
+                       ("su - postgres -c 'mysql -pPW db'", "su - postgres -c 'mysql -p*** db'"),
+                       ('eval "mysql -pPW db"', 'eval "mysql -p*** db"'),
+                       ("ssh h \"bash -c 'mysql -pPW'\"", "ssh h \"bash -c 'mysql -p***'\"")]))
+check("...but a quoted word that is no command line (a commit message, an echo, ssh's own -p) stays as it is",
+      lambda: all(sanitize.scrub(c) == c for c in ("git commit -m 'fix mysql -p parsing'", "echo 'bash -c \"mysql -p x\"'",
+                                                    "git commit -m 'ssh host \"mysql -p x\"'", "ssh -p 2222 host 'ls -p /'",
+                                                    "bash -c 'mkdir -p a/b && cp -p x y'", "sh -c 'tar -czpf x.tgz d'",
+                                                    "watch -n 5 'ps -p 123'")))
+check("scrub(): curl's bundled short options (-su, -fsSLu, -sualice:pw), an empty user (-u :token) and a URL with an "
+      "empty user (redis://:pw@) lose the password",
+      lambda: _cli_ok([("curl -su alice:PW https://x", "curl -su alice:*** https://x"),
+                       ("curl -fsSLu alice:PW https://x", "curl -fsSLu alice:*** https://x"),
+                       ("curl -sualice:PW https://x", "curl -sualice:*** https://x"),
+                       ("curl -o out.json -su alice:PW https://x", "-o out.json -su alice:***"),
+                       ("curl -u :PW https://x", "curl -u :*** https://x"),
+                       ("redis-cli -u redis://:PW@cache:6379 ping", "redis://:***@cache:6379 ping")]))
+check("...near misses stay: curl -s/-sS -o/-fsSL, -u without a password, a header with a colon, -d user:pass",
+      lambda: all(sanitize.scrub(c) == c for c in ("curl -s https://x", "curl -sS -o out https://x",
+                                                    "curl -fsSL https://x | sh", "curl -su alice https://x",
+                                                    "curl -o out -u alice: https://x", "curl -H 'X-User: a:b' https://x",
+                                                    "curl -d user:pass https://x", "http://localhost:8080/x@y",
+                                                    "ssh://git@host:22/x", "http://[::1]:8080/")))
+check("scrub(): mongo/mongosh/mongodump -p, the ldap tools' -w (bundled: -xw; ldappasswd's -a/-s too), smbclient's "
+      "and rpcclient's -U user%pw lose the password",
+      lambda: _cli_ok([("mongo -u admin -p PW db", "mongo -u admin -p *** db"), ("mongosh -u admin -pPW", "-p***"),
+                       ("mongodump -u a -p PW --db x", "-p *** --db x"),
+                       ("ldapsearch -x -D cn=admin -w PW -b dc=x", "-w *** -b dc=x"),
+                       ("ldapsearch -xwPW -b dc=x", "-xw*** -b dc=x"), ("ldapmodify -x -D cn=a -wPW -f c", "-w*** -f c"),
+                       ("ldappasswd -x -D cn=a -w PW -a PW -s PW uid=b", "-w *** -a *** -s *** uid=b"),
+                       ("smbclient //h/s -U user%PW", "-U user%***"), ("smbclient //h/s -Uuser%PW", "-Uuser%***"),
+                       ("rpcclient -U user%PW h", "-U user%*** h")]))
+check("...near misses stay: mongod --port, mongo -p with no value, ldapsearch -W (a prompt), smbclient -U user, -N",
+      lambda: all(sanitize.scrub(c) == c for c in ("mongod --port 27017", "mongo --port 27017 db",
+                                                    "mongo -u admin -p --authenticationDatabase admin",
+                                                    "ldapsearch -x -W -b dc=x", "ldapsearch -x -H ldap://h -b dc=x uid=w",
+                                                    "smbclient -L h -N", "smbclient //h/s -U user",
+                                                    "net -U user rpc info")))
+check("scrub(): `login` counts only as the subcommand (docker run -p 8080:80 img login stays; docker --config d login, "
+      "helm registry login and az acr login lose -p)",
+      lambda: all(sanitize.scrub(c) == c for c in ("docker run -p 8080:80 img login", "podman run -p 5000:5000 reg login",
+                                                    "docker push -q r/login"))
+      and _cli_ok([("docker --config /x login -u bob -p PW r.io", "--config /x login -u bob -p *** r.io"),
+                   ("helm registry login r.io -u x -p PW", "-p ***"), ("az acr login -n reg -u x -p PW", "-u x -p ***")]))
+# Round 3: what a command substitution runs is read again (round 2's tokenizer kept `"$(...)"` as one word
+# and never looked inside it: 9 of 10 forms leaked), and the inner command lines round 2 still missed.
+_subst = [('n="$(mysql -uroot -pPW -N -e "select 1" db)"', 'n="$(mysql -uroot -p*** -N -e "select 1" db)"'),
+          ('out="$(curl -u alice:PW https://x)"', 'out="$(curl -u alice:*** https://x)"'),
+          ('echo "$(redis-cli -a PW ping)"', 'echo "$(redis-cli -a *** ping)"'),
+          ('r="$(docker login -u b -p PW r.io)"', 'r="$(docker login -u b -p *** r.io)"'),
+          ('echo "$(echo PW | sudo -S id)"', 'echo "$(echo *** | sudo -S id)"'),
+          ('v="$(sshpass -p PW ssh h uptime)"', 'v="$(sshpass -p *** ssh h uptime)"'),
+          ("echo \"rows: $(mysql -pPW -e 'select count(*) from t' db)\"",
+           "echo \"rows: $(mysql -p*** -e 'select count(*) from t' db)\""),
+          ('if [ "$(mysql -pPW -e "x")" = 1 ]; then :; fi', 'if [ "$(mysql -p*** -e "x")" = 1 ]; then :; fi'),
+          ('logger "$(htpasswd -nb alice PW)"', 'logger "$(htpasswd -nb alice ***)"'),
+          ("x=`mysql -pPW -e 'select 1'`", "x=`mysql -p*** -e 'select 1'`"),
+          ('echo "`mysql -pPW`"', 'echo "`mysql -p***`"'),
+          ("x=$(mysql -pPW -e 'select 1')", "x=$(mysql -p*** -e 'select 1')"),
+          ('echo "$(cat "$(curl -u a:PW https://x)")"', 'echo "$(cat "$(curl -u a:*** https://x)")"'),
+          ('ssh h "x=\\$(mysql -pPW)"', 'ssh h "x=\\$(mysql -p***)"'),
+          ('echo "$(mysql -pPW', 'echo "$(mysql -p***')]
+check("scrub(): what a command substitution runs ($(...) and backticks, inside double quotes too, nested, one not "
+      "closed) loses its credentials: exactly the command back with only the value masked",
+      lambda: all(sanitize.scrub(c.replace("PW", _PW)) == want for c, want in _subst))
+check("...but text that only looks like one stays: a single-quoted $(...), arithmetic, awk's $(NF), a "
+      "substitution without credentials, a commit message naming a program",
+      lambda: all(sanitize.scrub(c) == c for c in ("echo '$(mysql -p x)'", "echo $((1 + 2))", "awk '{print $(NF)}' f",
+                                                    'echo "$(date)"', 'cd "$(git rev-parse --show-toplevel)"',
+                                                    "kill $(lsof -t -i:8080)", 'sh -c "$(curl -fsSL https://x/i.sh)"',
+                                                    'echo "user: `whoami` on $(hostname)"',
+                                                    'git commit -m "fix: $(mysql) parsing"')))
+_unclosed = [("I can't log in: mysql -u root -pPW app", "I can't log in: mysql -u root -p*** app"),
+             ("bash -c 'mysql -pPW", "bash -c 'mysql -p***"), ('ssh h "mysql -pPW', 'ssh h "mysql -p***'),
+             ('say "hello && curl -u a:PW https://x', 'say "hello && curl -u a:*** https://x')]
+check("...and a quote that is never closed (an apostrophe in prose, a cut command) never hides the rest of the text: "
+      "the words after it are read as before",
+      lambda: all(sanitize.scrub(c.replace("PW", _PW)) == want for c, want in _unclosed))
+_inner3 = [("bash -o pipefail -c 'mysql -pPW db'", "bash -o pipefail -c 'mysql -p*** db'"),
+           ('bash -euo pipefail -c "curl -u a:PW https://x"', 'bash -euo pipefail -c "curl -u a:*** https://x"'),
+           ("bash -O extglob -c 'mysql -pPW'", "bash -O extglob -c 'mysql -p***'"),
+           ("sh -c -- 'mysql -pPW'", "sh -c -- 'mysql -p***'"),
+           ("bash --norc -c 'mysql -pPW'", "bash --norc -c 'mysql -p***'"),
+           ('ssh host "bash -c \\"mysql -pPW\\""', 'ssh host "bash -c \\"mysql -p***\\""'),
+           ('ssh h "mysql -p\\"PW\\" db"', 'ssh h "mysql -p\\"***\\" db"'),
+           ("ssh h 'bash -c \"sh -c \\\"mysql -pPW\\\"\"'", "ssh h 'bash -c \"sh -c \\\"mysql -p***\\\"\"'"),
+           ('script -qc "mysql -pPW" /dev/null', 'script -qc "mysql -p***" /dev/null'),
+           ("su bob --command='mysql -pPW'", "su bob --command='mysql -p***'"),
+           ('vagrant ssh -c "mysql -pPW"', 'vagrant ssh -c "mysql -p***"'),
+           ("bash -c $'mysql -pPW'", "bash -c $'mysql -p***'"),
+           ("tmux new-session -d 'mysql -pPW'", "tmux new-session -d 'mysql -p***'")]
+check("scrub(): more command lines quoted in another: a shell's options before -c (-o pipefail, -euo pipefail, -O, "
+      "--norc, -c --), escaped quotes inside ssh \"...\", script -qc, su --command=, vagrant ssh -c, $'...', tmux",
+      lambda: all(sanitize.scrub(c.replace("PW", _PW)) == want for c, want in _inner3))
+check("...near misses stay: bash -o vi, bash -x script.sh, script -q file cmd, tmux send-keys 'ls -p', an escaped "
+      "quote with no credential",
+      lambda: all(sanitize.scrub(c) == c for c in ("bash -o vi", "bash -x script.sh arg", "sh -e ./x.sh",
+                                                    "script -q /dev/null ls -la", "su - bob",
+                                                    "tmux send-keys -t dev 'ls -p' Enter",
+                                                    "tmux new-session -d 'make -j4 && make install'",
+                                                    'ssh h "echo \\"hello world\\""')))
+_more3 = [("curl -E cert.pem:PW https://x", "curl -E cert.pem:*** https://x"),
+          ("curl --cert cert.pem:PW https://x", "curl --cert cert.pem:*** https://x"),
+          ("curl -sE 'c.pem:PW' https://x", "curl -sE 'c.pem:***' https://x"),
+          ("curl --cert=c.pem:PW https://x", "curl --cert=c.pem:*** https://x"),
+          ("smbclient //srv/share PW -U user", "smbclient //srv/share *** -U user"),
+          ("smbclient -U user '//srv/share' PW", "smbclient -U user '//srv/share' ***"),
+          ("podman --cgroup-manager systemd login -p PW r", "podman --cgroup-manager systemd login -p *** r"),
+          ("podman --remote login -p PW r", "podman --remote login -p *** r"),
+          ("podman --log-level debug --events-backend file login -u x -p PW r",
+           "podman --log-level debug --events-backend file login -u x -p *** r")]
+check("scrub(): curl's -E/--cert file:password, smbclient's password after the share, and podman's global options "
+      "before login (any long one with its value) lose the password",
+      lambda: all(sanitize.scrub(c.replace("PW", _PW)) == want for c, want in _more3))
+check("...near misses stay: curl -E with no password, a pkcs11 URI, smbclient -c/-N after the share, podman --remote "
+      "ps, a docker run whose image is called login",
+      lambda: all(sanitize.scrub(c) == c for c in ("curl -E cert.pem https://x", "curl --cert c.pem https://x",
+                                                    "curl -E 'pkcs11:object=k' https://x",
+                                                    "smbclient //h/s -c 'ls'", "smbclient //h/s -N",
+                                                    "smbclient -L //h -U user", "podman --remote ps",
+                                                    "docker --context prod run -p 8080:80 img login",
+                                                    "docker --tls run --rm -p 8080:80 img login")))
+_cont = [("curl -u \\\n  alice:PW https://x", "curl -u \\\n  alice:*** https://x"),
+         ("curl --user \\\n  alice:PW https://x", "curl --user \\\n  alice:*** https://x"),
+         ("sshpass \\\n  -p PW ssh h", "sshpass \\\n  -p *** ssh h"),
+         ("docker login -u bob -p \\\n  PW r.io", "docker login -u bob -p \\\n  *** r.io"),
+         ("mysql -u root \\\n  -pPW app", "mysql -u root \\\n  -p*** app")]
+check("scrub(): a line continuation (backslash-newline) between an option and its value is a space: the value is "
+      "masked, never the backslash",
+      lambda: all(sanitize.scrub(c.replace("PW", _PW)) == want for c, want in _cont))
+_t0 = time.time()
+_long = [sanitize.scrub("curl " + "a" * 100000), sanitize.scrub("curl -u x " + "a-" * 50000),
+         sanitize.scrub("printf %s " + "0123456789abcdef" * 6250 + " TOKEN=" + _PW),
+         sanitize.scrub("x " + "a." * 50000 + " --password " + _PW),
+         sanitize.scrub("we use curl, it's fine; " * 10 + "curl it's " * 20000 + "curl -u a:" + _PW)]
+_long_s = time.time() - _t0
+check("scrub(): a 100,000-character word costs its length, not its square (a word with a hint, dashes, hex, dots; a "
+      "line naming curl 20,000 times: under 10 s together; round 2 took ~96 s for the first alone), and an "
+      "assignment, flag or credential after it still loses its value",
+      lambda: _long_s < 10 and _PW not in _long[2] and _PW not in _long[3] and "TOKEN=***" in _long[2]
+      and _PW not in _long[4] and _long[4].endswith("curl -u a:***"))
+# Round 4 (round 3's must-fix): an apostrophe in a comment, a here-document's body or prose paired with a later
+# quote and hid every command line between (round 3 read inside Claude Code's own commit form and regressed it).
+_cmt = [("# Don't print the password\nmysql -u root -pPW -e 'select 1' db",
+         "# Don't print the password\nmysql -u root -p*** -e 'select 1' db"),
+        ("cd /srv  # don't forget\ncurl -u admin:PW https://x/api -d '{}'",
+         "cd /srv  # don't forget\ncurl -u admin:*** https://x/api -d '{}'"),
+        ("set -e\n# it's prod, be careful\ndocker login -u bob -p PW r.io\ndocker push r.io/app:latest\necho 'done'",
+         "set -e\n# it's prod, be careful\ndocker login -u bob -p *** r.io\ndocker push r.io/app:latest\necho 'done'"),
+        ("# Ask O'Neil first\ngit commit -m \"notes\n\nmore\" && mysql -pPW -e \"select 'a'\"",
+         "# Ask O'Neil first\ngit commit -m \"notes\n\nmore\" && mysql -p*** -e \"select 'a'\""),
+        ("# mysql -u root -pPW app\nls", "# mysql -u root -p*** app\nls"), ("ls  # mysql -pPW", "ls  # mysql -p***")]
+check("scrub(): a # comment ends at its newline as in the shell: its apostrophe hides no later line (exactly the "
+      "text back with only the value masked), and a commented-out credential command still loses its value",
+      lambda: all(sanitize.scrub(c.replace("PW", _PW)) == want for c, want in _cmt))
+_hd = [("cat > NOTES.md <<'EOF'\nDon't commit the password.\nEOF\nmysql -uroot -pPW app -e 'select 1'",
+        "cat > NOTES.md <<'EOF'\nDon't commit the password.\nEOF\nmysql -uroot -p*** app -e 'select 1'"),
+       ("cat > NOTES.md <<EOF\nIt's $(date)\nEOF\nmysql -uroot -pPW -e 'select 1' app",
+        "cat > NOTES.md <<EOF\nIt's $(date)\nEOF\nmysql -uroot -p*** -e 'select 1' app"),
+       ("cat <<-EOF\n\tO'Reilly\n\tEOF\nmysql -pPW -e 'select 1'", "cat <<-EOF\n\tO'Reilly\n\tEOF\nmysql -p*** -e 'select 1'"),
+       ("cat << EOF\nO'Reilly\nEOF\nmysql -pPW -e 'select 1'", "cat << EOF\nO'Reilly\nEOF\nmysql -p*** -e 'select 1'"),
+       ('cat <<"EOF"\nO\'Reilly\nEOF\nmysql -pPW -e \'select 1\'', 'cat <<"EOF"\nO\'Reilly\nEOF\nmysql -p*** -e \'select 1\''),
+       ("cat <<A <<'B'\nO'R\nA\nit's 'x\nB\nmysql -pPW -e 'select 1'", "cat <<A <<'B'\nO'R\nA\nit's 'x\nB\nmysql -p*** -e 'select 1'"),
+       ("cat <<EOF && mysql -pPW db\nO'Reilly\nEOF\necho 'x'", "cat <<EOF && mysql -p*** db\nO'Reilly\nEOF\necho 'x'"),
+       ("cat > notes.txt <<'EOF'\nAsk O'Neil first\nEOF\ngit commit -m \"Add notes\n\nMore\" && mysql -pPW -e \"select 'a'\"",
+        "cat > notes.txt <<'EOF'\nAsk O'Neil first\nEOF\ngit commit -m \"Add notes\n\nMore\" && mysql -p*** -e \"select 'a'\""),
+       # What an unquoted body runs is still read (its quotes are characters there).
+       ("cat <<EOF\nHi O'Neil, rows: $(mysql -pPW -e 'select count(*) from t' db)\nEOF",
+        "cat <<EOF\nHi O'Neil, rows: $(mysql -p*** -e 'select count(*) from t' db)\nEOF"),
+       # A script a here-document writes: its lines are still read on their own.
+       ("cat > deploy.sh <<'EOF'\nmysql -u root -pPW app < dump.sql\nEOF\nchmod +x deploy.sh",
+        "cat > deploy.sh <<'EOF'\nmysql -u root -p*** app < dump.sql\nEOF\nchmod +x deploy.sh"),
+       ("use cat <<EOF to write it\nmysql -pPW app", "use cat <<EOF to write it\nmysql -p*** app")]
+check("scrub(): a here-document's body (<<WORD, <<-WORD, << WORD, <<'WORD', <<\"WORD\", two on a line, one never "
+      "terminated) is skipped as the shell does: exactly the text back with only the value masked; an unquoted body's "
+      "$(...) is still read, and a credential line inside a body still loses its value",
+      lambda: all(sanitize.scrub(c.replace("PW", _PW)) == want for c, want in _hd))
+# Round 4's review: a credential on a line continued with a backslash inside a here-document's body (one option per
+# line, a script written through cat or sent to `ssh host bash`) leaked once the body was skipped.
+_hdc = [("ssh db1 'bash -s' <<'EOF'\ncurl -fsS \\\n  -u admin:PW \\\n  https://h/\nEOF",
+         "ssh db1 'bash -s' <<'EOF'\ncurl -fsS \\\n  -u admin:*** \\\n  https://h/\nEOF"),
+        ("cat > deploy.sh <<'EOF'\nmysql -u root \\\n  -pPW app\nEOF\nchmod +x deploy.sh",
+         "cat > deploy.sh <<'EOF'\nmysql -u root \\\n  -p*** app\nEOF\nchmod +x deploy.sh"),
+        ("cat <<-EOF > x.sh\n\tsshpass -p \\\n\t  PW ssh web1 uptime\n\tEOF",
+         "cat <<-EOF > x.sh\n\tsshpass -p \\\n\t  *** ssh web1 uptime\n\tEOF"),
+        ("ssh db1 <<EOF\ndocker login \\\n  -u bob -p PW r.io\nEOF", "ssh db1 <<EOF\ndocker login \\\n  -u bob -p *** r.io\nEOF"),
+        ("bash -c \"$(cat <<'EOF'\nmysql -u root \\\n  -pPW app\nEOF\n)\"",
+         "bash -c \"$(cat <<'EOF'\nmysql -u root \\\n  -p*** app\nEOF\n)\"")]
+_hdc_benign = ["docker run --rm \\\n  -p 8080:80 \\\n  -v \"$PWD:/src\" img",
+               "cat > build.sh <<'EOF'\ncmake -S . -B build \\\n  -DCMAKE_BUILD_TYPE=Release\nEOF",
+               "tar -czpf out.tgz \\\n  src/ docs/", "ssh -p 2222 \\\n  web1 'ls -p /srv'",
+               "sed -e's,a,b,' -e's,c,d,' f.txt", "awk -F'\\t' '{print $1}' f.tsv",
+               "docker run -v \"$PWD:/src\" -w /src img make", "cp $PWD:/x y"]
+check("scrub(): a variable's value followed by text ($PWD:/src) is no NAME: value, while ${DB_PASS:-default} and "
+      "PWD: value still lose the value",
+      lambda: sanitize.scrub("docker run -v \"$PWD:/src\" img") == "docker run -v \"$PWD:/src\" img"
+      and _PW not in sanitize.scrub("x=${DB_PASS:-" + _PW + "}") and _PW not in sanitize.scrub("PWD: " + _PW))
+# An option's quoted value glued to it (-e's,a,b,', -d't ') is a quote, not a contraction: read as one, it paired
+# with a later quote and hid the credential command between (found by the 0.8.0 verification's mutation).
+_optq = [("sed -e's,a,b,' f && mysql -pPW -e 'select 1'", "sed -e's,a,b,' f && mysql -p*** -e 'select 1'"),
+         ("sed -e's,a,b,' f.txt && curl -u admin:PW https://x -d '{}'",
+          "sed -e's,a,b,' f.txt && curl -u admin:*** https://x -d '{}'"),
+         ("cut -d't ' -f1 f && mysql -uroot -pPW -e 'select 1'", "cut -d't ' -f1 f && mysql -uroot -p*** -e 'select 1'")]
+check("scrub(): an option's quoted value glued to it (-e's,a,b,', -d't ') is read as a quote, so a credential "
+      "command after it still loses its value (exactly the text back with only the value masked)",
+      lambda: all(sanitize.scrub(c.replace("PW", _PW)) == want for c, want in _optq))
+check("scrub(): a credential on a backslash-continued line inside a here-document's body loses its value (exactly the "
+      "text back with only the value masked), while continued commands with no credential, and an option's quoted value "
+      "glued to it (-e's,a,b,', -F'\\t'), come back unchanged",
+      lambda: all(sanitize.scrub(c.replace("PW", _PW)) == want for c, want in _hdc)
+      and all(sanitize.scrub(c) == c for c in _hdc_benign))
+_commit ="git commit -m \"$(cat <<'EOF'\n{msg}\n\nCo-Authored-By: x <y@z>\nEOF\n)\" && "
+_cf = [(_commit.format(msg="fix: don't drop the table") + "mysql -uroot -pPW -e 'select 1'", "mysql -uroot -p*** -e 'select 1'"),
+       (_commit.format(msg="fix: don't drop the table") + "curl -u ci:PW -X POST https://ci/api -d '{}'",
+        "curl -u ci:*** -X POST https://ci/api -d '{}'"),
+       (_commit.format(msg="fix: don't drop it, it's needed") + "sshpass -p PW ssh h 'uptime'", "sshpass -p *** ssh h 'uptime'"),
+       (_commit.format(msg="Update O'Reilly link") + "curl -u ci:PW -H \"X-A: b\" -d '{}' https://x",
+        "curl -u ci:*** -H \"X-A: b\" -d '{}' https://x")]
+check("scrub(): Claude Code's commit form (git commit -m \"$(cat <<'EOF' ... EOF\\n)\" && ...) with an apostrophe in "
+      "the message (a contraction, or a name's: O'Reilly, with a `)\"` followed by another quote on its line): "
+      "exactly the text back with only the value masked",
+      lambda: all(sanitize.scrub(c.replace("PW", _PW)) == c[:c.index("&& ") + 3] + want for c, want in _cf))
+_ml = [("I'm getting an error when I run\nmysql -u root -pPW app\nIt's saying access denied",
+        "I'm getting an error when I run\nmysql -u root -p*** app\nIt's saying access denied"),
+       ("It's failing. I ran:\nmysql -u root -pPW app\nand it didn't connect",
+        "It's failing. I ran:\nmysql -u root -p*** app\nand it didn't connect"),
+       ("Ask O'Neil about it:\nmysql -u root -pPW app\nthe 'prod' one", "Ask O'Neil about it:\nmysql -u root -p*** app\nthe 'prod' one"),
+       ("Use this:\n```\nmysql -u root -pPW app\n```\nThat's the prod one.",
+        "Use this:\n```\nmysql -u root -p*** app\n```\nThat's the prod one.")]
+check("scrub(): a multi-line prompt with apostrophes (contractions, a name's) around a command loses its credential: "
+      "each line is read again on its own; exactly the text back with only the value masked",
+      lambda: all(sanitize.scrub(c.replace("PW", _PW)) == want for c, want in _ml))
+_ctr = [("I can't log in with mysql -u root -pPW app, it's denied", "I can't log in with mysql -u root -p*** app, it's denied"),
+        ("I can't log in with mysql -u root -pPW app, it's saying access denied",
+         "I can't log in with mysql -u root -p*** app, it's saying access denied"),
+        ("why doesn't `curl -u admin:PW https://x` work? it's returning 401",
+         "why doesn't `curl -u admin:*** https://x` work? it's returning 401"),
+        ("I'd say we're fine: I've run sshpass -p PW ssh h uptime and you'll see I'm right",
+         "I'd say we're fine: I've run sshpass -p *** ssh h uptime and you'll see I'm right"),
+        ("Ask O'Neil: mysql -u root -pPW app, it can't connect", "Ask O'Neil: mysql -u root -p*** app, it can't connect"),
+        ("sed -e's/a/b/' f && mysql -pPW -e 'select 1'", "sed -e's/a/b/' f && mysql -p*** -e 'select 1'")]
+check("scrub(): on one line, a contraction's apostrophe (can't, it's, I'd, we're, I've, you'll, I'm: after a letter, "
+      "then a space, punctuation or the end) opens no quote and closes none, so the command between two of them, or "
+      "between a name's apostrophe and one (O'Neil ... can't), loses its credential; sed -e's/a/b/' stays a quote",
+      lambda: all(sanitize.scrub(c.replace("PW", _PW)) == want for c, want in _ctr))
+check("...near misses stay as they are: the commit form, a here-document, a here-string, arithmetic <<, a comment "
+      "naming a program, `#` inside a word, sed -e's/../', grep -e't', cut -d' ', a quoted it's",
+      lambda: all(sanitize.scrub(c) == c for c in (
+          _commit.format(msg="fix: keep the table")[:-4], _commit.format(msg="fix: don't drop the table")[:-4],
+          "cat <<EOF\nhello\nEOF", "cat <<< \"$x\"", "echo $((1 << 2))", "x=1 # a comment naming mysql",
+          "echo a#b && curl https://x/#frag", "sed -e's/a/b/' f", "grep -e't' f", "cut -d' ' -f1 f",
+          "printf '%s\\n' \"it's\"", "git commit -m 'fix mysql -p parsing'")))
+# Should-fix 1 and 2 of round 3: what was still quadratic (each form's own size; round 3 took 2-10 s each).
+_quad = {"su": "su " * 24000 + "-c 'mysql -pPW'", "script": "script " * 24000 + "-c 'mysql -pPW'",
+         "sh -o": "sh -o " * 8000 + "; sh -c 'mysql -pPW'", "ssh -p": "ssh -p " * 12000 + "h; ssh h 'mysql -pPW'",
+         "sudo -u": "sudo -u " * 8000 + "x; echo PW | sudo -S true", "vagrant": "vagrant ssh " * 16000 + "-c 'mysql -pPW'",
+         "url scheme": "x " + "a+" * 50000 + " https://u:PW@h"}
+_quad_s = {}
+for _k, _t in _quad.items():
+    _t0 = time.time()
+    _quad[_k] = sanitize.scrub(_t.replace("PW", _PW))
+    _quad_s[_k] = time.time() - _t0
+check("scrub(): su/script/a shell's -o/ssh -p/sudo -u/vagrant ssh repeated thousands of times on one line, and a "
+      "100,000-character word glued to :// cost their length (each under 2.5 s; round 3: 2-10 s), and the credential "
+      "after them still loses its value",
+      lambda: all(s < 2.5 for s in _quad_s.values()) and not any(_PW in o for o in _quad.values()))
+if any(s >= 2.5 for s in _quad_s.values()):
+    print(f"       (seconds: { {k: round(v, 2) for k, v in _quad_s.items()} })")
+_memo_cap = sanitize._MEMO_CHARS
+sanitize._MEMO_CHARS = 5000      # (16 M characters in use; scaled down here)
+try:
+    with sanitize.remembered():
+        _big = [sanitize.scrub(f"{i:03d} TOKEN={_PW} " + "y z " * 50) for i in range(30)]
+        _again = [sanitize.scrub(f"{i:03d} TOKEN={_PW} " + "y z " * 50) for i in range(30)]
+        _memo_n, _memo_chars = len(sanitize._MEMO), sanitize._memo_chars
+finally:
+    sanitize._MEMO_CHARS = _memo_cap
+check("sanitize.remembered(): the memo is bounded by the total size of its texts and answers too (30 texts of ~230 "
+      "characters against 5000: some not kept), every answer still right, all of it gone at the end",
+      lambda: 0 < _memo_n < 30 and _memo_chars <= 5000 and _big == _again
+      and all(_PW not in b and "TOKEN=***" in b for b in _big) and sanitize._MEMO is None)
 
 _lib = (ROOT / "hooks" / "lib.sh").read_text()
 check("the shell and Python agree on the spool: payload cap and the size of files hashed (lib.sh = capture.py)",
@@ -378,6 +754,30 @@ journal.append(T4, [{"kind": "checkpoint", "op": "c1", "session": "s"}], sync=Tr
 check("sync=True: synced (F_FULLFSYNC where there is one) before append returns", lambda: _syncs[-1] is True and len(_syncs) == 2)
 del os.environ["CHECKPOINT_FSYNC_EVERY"]
 journal._durable = _real_durable
+
+# The spool's payloads are the only copy until the journal's records are on
+# disk: an unsynced ingest (the mod's timer, a PostToolUse moment) syncs the
+# segment before it deletes them, so a power loss can't lose both.
+JD = "sess-durable"
+JDP = JT / "durable"
+JDP.mkdir()
+hook("SessionStart", jbase(JD, JDP, source="startup"))
+capture.ingest(JD, sync=True)
+for i in range(3):
+    hook("UserPromptSubmit", jbase(JD, JDP, prompt=f"durable step {i}", prompt_id=f"pd{i}"))
+_order = []
+_real_unlink = Path.unlink
+journal._durable = lambda fd, full: (_order.append(("sync", full)), _real_durable(fd, full))[1]
+Path.unlink = lambda self, *a, **kw: (_order.append(("unlink", self.name)), _real_unlink(self, *a, **kw))[1]
+try:
+    _rd = capture.ingest(JD)     # sync=False, as `run ingest <sid>` from the mod's timer
+finally:
+    Path.unlink = _real_unlink
+    journal._durable = _real_durable
+_first_rm = next((i for i, (k, n) in enumerate(_order) if k == "unlink" and n.endswith(".ev")), None)
+check("an unsynced ingest syncs the journal (F_FULLFSYNC where there is one) before it deletes the spool payloads",
+      lambda: _rd.records >= 3 and _first_rm is not None and ("sync", True) in _order[:_first_rm]
+      and not spooled(JD))
 
 # Write failures: ENOSPC and EIO, simulated under the writer; the spool keeps
 # the events, the failure is recorded and said once.
@@ -607,6 +1007,27 @@ check("a test command: its intent is marked validation, a background snapshot re
       and ver.get("head") and {os.path.realpath(k): v for k, v in ver.get("files", {}).items()}.get(
           os.path.realpath(CP / "app.py")) == after
       and any(x["kind"] == "tool.outcome" and x["data"].get("exit") == 1 for x in vv))
+# A failed command that isn't a test, build or check: Claude Code's error is
+# "Exit code N" and then the output so far (a `cat` of a file, say).
+_fail_pw = _rand(18)
+hook("PreToolUse", jbase(SC, CP, TPC, tool_name="Bash", tool_use_id="nf1",
+                         tool_input={"command": "cat deploy/notes.txt && ./deploy.sh"}), EC)
+hook("PostToolUseFailure", jbase(SC, CP, TPC, tool_name="Bash", tool_use_id="nf1",
+                                 tool_input={"command": "cat deploy/notes.txt && ./deploy.sh"},
+                                 error=f"Exit code 1\nadmin login: alice / {_fail_pw}\ndeploy failed",
+                                 is_interrupt=False), EC)
+hook("PreToolUse", jbase(SC, CP, TPC, tool_name="Bash", tool_use_id="nf2", tool_input={"command": "./sync.sh"}), EC)
+hook("PostToolUseFailure", jbase(SC, CP, TPC, tool_name="Bash", tool_use_id="nf2", tool_input={"command": "./sync.sh"},
+                                 error=f"Interrupted by user\ncustomer row {_fail_pw}", is_interrupt=True), EC)
+capture.ingest(SC)
+nf = {x["op"]: x["data"] for x in jrecs(TC) if x["op"] in ("nf1", "nf2", "vt1") and x["kind"] == "tool.outcome"}
+check("a failed command that isn't a test, build or check: only Claude Code's first line (its exit code, an "
+      "interrupt) and the size are journaled, never the output",
+      lambda: nf["nf1"].get("error") == "Exit code 1" and nf["nf1"].get("exit") == 1 and nf["nf1"]["error_chars"] > 30
+      and nf["nf2"].get("error") == "Interrupted by user" and nf["nf2"].get("interrupted") is True
+      and not scan_for([_fail_pw], journal.jdir(TC)))
+check("...a failed test keeps its scrubbed output tail (the evidence)",
+      lambda: nf["vt1"].get("error") == "Exit code 1\n1 failed, 3 passed")
 check("validation_kind: tests, builds and checks; not ordinary commands",
       lambda: [capture.validation_kind(c) for c in ("pytest -q", "npm run build", "cargo clippy", "make", "./run_tests.sh",
                                             "go test ./...", "ls -la", "git checkout main", "echo hi")]
@@ -1370,6 +1791,30 @@ print(f"       fast path, median of 40 ({SH}): PreToolUse {base_pre:.1f} -> {wit
       f"PostToolUse {base_post:.1f} -> {with_post:.1f} ms (added {added:.1f} ms)")
 check("the spool's added cost on the fast path is small (median added <= 10 ms per hook; no Python)", lambda: added <= 10)
 JOURNAL_PERF = {"pre_ms": [round(base_pre, 1), round(with_pre, 1)], "post_ms": [round(base_post, 1), round(with_post, 1)]}
+# As installed: no CHECKPOINT_PYTHON, a runtime ready (recorded in rt/<session>). The spool then asks whether
+# its runtime is there (ck_body: a `read` and two file tests) and keeps its size count (.size): no process either.
+_perf_data = TMP / "perf data"
+_perf_py = _perf_data / "envs" / LOCK_SHA / ".pixi" / "envs" / "default" / "bin" / "python3"
+_perf_py.parent.mkdir(parents=True)
+_perf_py.symlink_to(sys.executable)
+(_perf_data / "envs" / LOCK_SHA / ".ready").write_text("")
+state.touch(state.p("rt", SP), str(_perf_data / "envs" / LOCK_SHA))
+_perf_env = {"CHECKPOINT_PYTHON": "", "CLAUDE_PLUGIN_DATA": str(_perf_data), "CHECKPOINT_NUDGE_EVERY": "100000"}
+for _ in range(3):
+    _timed(WITH / "hooks" / "fast.sh", "PostToolUse", pay, 3, _perf_env)
+    _timed(NOSPOOL / "hooks" / "fast.sh", "PostToolUse", pay, 3, _perf_env)
+rb_pre = _timed(NOSPOOL / "hooks" / "fast.sh", "PreToolUse", pay, 40, _perf_env)
+rw_pre = _timed(WITH / "hooks" / "fast.sh", "PreToolUse", pay, 40, _perf_env)
+rb_post = _timed(NOSPOOL / "hooks" / "fast.sh", "PostToolUse", pay, 40, _perf_env)
+rw_post = _timed(WITH / "hooks" / "fast.sh", "PostToolUse", pay, 40, _perf_env)
+radded = max(rw_pre - rb_pre, rw_post - rb_post)
+print(f"       ...as installed (runtime ready, no CHECKPOINT_PYTHON): PreToolUse {rb_pre:.1f} -> {rw_pre:.1f} ms, "
+      f"PostToolUse {rb_post:.1f} -> {rw_post:.1f} ms (added {radded:.1f} ms)")
+check("...as installed (a ready runtime, no CHECKPOINT_PYTHON): the spool's whole cost, the runtime check and the "
+      "size count included, stays as small (median added <= 10 ms per hook)",
+      lambda: radded <= 10 and (capture.spool_dir(SP) / ".size").exists()
+      and not any(ln.endswith("\tmeta=1") for ln in index_lines(SP)))
+JOURNAL_PERF["installed_ms"] = [round(rb_pre, 1), round(rw_pre, 1), round(rb_post, 1), round(rw_post, 1)]
 # Ingest cost: 1000 spooled events of one session, written the way ck_spool writes them.
 SI = "sess-ingest-perf"
 d_ = capture.spool_dir(SI)

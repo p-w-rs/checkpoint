@@ -1,5 +1,7 @@
 # Architecture
 
+> Developer documentation for checkpoint 0.8.0: how the plugin is built. For using it, see the [README](../../README.md).
+
 Hooks, an MCP server, skills (the `/check:*` commands) and a mod (Claude
 Code's native hooks module, `hooks/mod/`), sharing `src/checkpoint/` through
 `run.py`, plus a POSIX `sh` pre-filter in front of every hook. The hooks and
@@ -40,7 +42,8 @@ job tools ────▶ MCP server "jobs" (sh hooks/env.sh mcp: the env's pyth
 pause/resume ─▶ core.gateway_pause / gateway_resume: POST /v1/pause, /v1/resume (once per pause, with
                   its pause id; late delivery while still paused, never just before a resume; an
                   uncertain one resent only when that can't signal a job twice)
-every event ──▶ fast.sh ck_spool: payload file + one index line in spool/<sid>/ (no Python)
+every event ──▶ fast.sh ck_spool: payload file + one index line in spool/<sid>/ (no Python; while no
+                  runtime is there or on its way, names, ids and sizes only; capped per session)
   (also SessionEnd, PreCompact, PostCompact, SubagentStart/Stop, Notification, PermissionDenied,
    PermissionRequest, TaskCreated/Completed; the mod adds turn.start/complete, compactions, its
    denials, and Claude Code's permission verdicts (tool.check) with what came of an ask: env.sh spool)
@@ -53,7 +56,8 @@ resume ───────▶ a typed message / /check:resume [task|checkpoint
                   a crash, --resume or /compact ─▶ recovery.reconcile (reads only) ─▶ the resume context
                   (Check first, the five classes, files, git, validation, instructions, lineage, the
                   hosts the task used and its authorizations against the gateway's snapshot now) + summary
-/check:list|diff|cancel|stop|complete|export ─▶ core / recovery (never resume; available while paused)
+/check:list|diff|cancel|stop|complete|export|forget ─▶ core / recovery / purge (never resume; available
+                  while paused)
 ```
 
 ## Modules
@@ -63,26 +67,27 @@ resume ───────▶ a typed message / /check:resume [task|checkpoint
 | `hooks/fast.sh` | Pre-filter for all hooks. Reads `session_id`, `transcript_path`, `cwd`, `tool_name` with grep/sed; starts Python only when there's work. Not paused + nothing queued costs a `tail \| grep` of the transcript (the same tail Python reads: last 256 KB, cut first line dropped). Allows the three job tools that only read or stop jobs. |
 | `hooks/watch.sh` | One per running foreground Bash call. Every 2 s: a queued `pause now` or `now/<sid>`? Then `run.py watch-fire`. Exits when PostToolUse removes `running/<id>.json`, when the call's `tool_result` is in the transcript (a cancelled or denied call fires no PostToolUse; a subagent's goes to its own transcript), or when Claude exits. |
 | `hooks/pixi.sh` | Finds pixi on PATH or in the usual install folders (`$PIXI_HOME/bin`, `~/.pixi/bin`, `~/.local/bin`, Homebrew, MacPorts, Linuxbrew) and execs it. |
-| `hooks/lib.sh` | Sourced by the sh scripts: where the runtime lives (`ck_env`), whether it is ready, the previous env during an update, running `run.py` with it (`ck_exec_py`: `-I -S -X pycache_prefix=$DATA/pycache`), the build lock with live owners, the build (`pixi install --locked`), warming, cleanup, the background kick, `ck_state`, atomic writes, `degraded/<sid>`. |
+| `hooks/lib.sh` | Sourced by the sh scripts: where the runtime lives (`ck_env`), whether it is ready, the previous env during an update, running `run.py` with it (`ck_exec_py`: `-I -S -X pycache_prefix=$DATA/pycache`), the build lock with live owners, the build (`pixi install --locked`), warming, cleanup, the background kick, `ck_state`, atomic writes, `degraded/<sid>`; the spool (`ck_spool`; `ck_body`: whole payloads only while a runtime is there or on its way; `ck_spool_trim`: the per-session cap, after `ck_spool_count` recounts the real files (a torn `.size` line never trims), and without a runtime it moves the index to `index.s<n>` (`.trimdone`: the highest one it finished); `ck_spool_prune`: dead sessions' quiet spools at a session start). |
 | `hooks/env.sh` | `ensure` (the async SessionStart hook and the kick), `mcp` (the MCP server's launcher: starts a build and waits up to 25 s), `cli` (the terminal helper), `run` (the mod: Python now or exit 75), `doctor` (the runtime half of /check:doctor, no Python), `state` (also the mod's status before SessionStart recorded the env), `contract-path` (where the gateway's discovery file is, for the mod's pause), `flag` (the mod's atomic flag writes: pause, now, noresume). |
-| `hooks/mod/register.tsx` | The mod: `/check-pause [now]` and `/check-doctor` (immediate), answers `/check:pause [now]`, `/check:doctor` and `/check:status` without a model turn, the `tool.call` gate (fails closed), the no-self-resume mark, `pause` typed over a running turn, its state (normal ones as a footer mode label, a pause or a failure on the status line). State on disk only (flags/, rt/, jobs.json); module variables hold the running turn and the calls in flight. |
+| `hooks/mod/register.tsx` | The mod: `/check-pause [now]` and `/check-doctor` (immediate), answers `/check:pause [now]`, `/check:doctor` and `/check:status` without a model turn (its doctor adds Python's journal, gateway and stuck-job lines through `run doctor-py` when a runtime answers), the `tool.call` gate (fails closed), the no-self-resume mark, `pause` typed over a running turn, its state (normal ones as a footer mode label, a pause or a failure on the status line). State on disk only (flags/, rt/, jobs.json); module variables hold the running turn and the calls in flight. |
 | `hooks/mod/logic.ts` | Its pure helpers (ids, the allow list, the pause forms, texts), checked against Python by the suite. |
-| `state.py` | State dir layout (see its docstring), flock, atomic JSON writes, pause flags, the fixed settings, live sessions (newest record per running Claude pid), the queued-command memory (`queue_handled`, the `queued_pauses` list + `queued/<sid>`), the trackers each session wrote, pruning (skipped without a process table), and migrating 0.1's global `paused-all` file. |
+| `state.py` | State dir layout (see its docstring), flock, atomic JSON writes, pause flags, the fixed settings (`trackers_on`: `CHECKPOINT_TRACKERS=off` drops the tracker session note, the reminders, the Stop block and the tracker word of the paused deny; the journal records the same), live sessions (newest record per running Claude pid), the queued-command memory (`queue_handled`, the `queued_pauses` list + `queued/<sid>`), the trackers each session wrote, pruning (skipped without a process table), and migrating 0.1's global `paused-all` file. |
 | `transcript.py` | Transcript tail; replays `queue-operation` enqueue/dequeue/remove to find the pending pause commands (oldest first), and (over the whole file) what became of a handled one: still pending, dequeued or removed; tool results; Bash commands and recent tool calls. |
 | `tracker.py` | Finds and parses `.work/<task>/TRACKER.md` (stages table, sections, `Session:` id). A tracker naming this session is its own; one naming no session is a fallback only for a session that wrote it; one naming another session is never used. Read-only. |
-| `core.py` | Pause (incl. `now` (= `interrupt`), `all`, `--stop-jobs`, another session, and the queued command's second run; a plain pause names a foreground command it leaves running; `now` says exactly what stopping did (processes, SIGTERM or SIGKILL, survivors) and records `op.killed`; `now` without a process table says it couldn't stop the command, never "No command was running", and so does a command nothing of which died even of SIGKILL; the session's `unstopped` list, with why and cleared on resume, lets the queued command's echo say so too), checkpoint (and one per pause), the resume context (built on `recovery`), resume here / of a task / from a checkpoint (`select`), `resume_now` (the mod's `/check-resume`), `cancel` (child-work policy), `complete`, `stop_job`, list and diff, resume all, status. |
+| `core.py` | Pause (incl. `now` (= `interrupt`), `all`, `--stop-jobs`, another session, and the queued command's second run; a plain pause names a foreground command it leaves running; `now` says exactly what stopping did (processes, SIGTERM or SIGKILL, survivors) and records `op.killed`; `now` without a process table says it couldn't stop the command, never "No command was running", and so does a command nothing of which died even of SIGKILL; the session's `unstopped` list, with why and cleared on resume, lets the queued command's echo say so too), checkpoint (and one per pause; `checkpoint.json` next to a tracker lands in the user's project, so its calls, jobs and interrupted commands are scrubbed when written, and `ensure_excluded` puts the work folder into the clone's `info/exclude` unless the repository tracks it, never twice), the resume context (built on `recovery`), resume here / of a task / from a checkpoint (`select`), `resume_now` (the mod's `/check-resume`), `cancel` (child-work policy), `complete`, `stop_job`, `forget_job` (a gateway job unknown for over 7 days, `jobs.release`), `stuck_jobs_doctor` (those jobs in `/check:doctor`, with the command), list and diff, resume all, status (this session's own summary, never another's; this project's unfinished tasks: `unfinished_tasks`). |
 | `procs.py` | Process table with state and start time (`/proc` on Linux, `ps` on macOS: `/bin/ps` first, and the next `ps` whenever one fails or gives no rows; empty means unknown; `zombie()` likewise takes only an output that is a process state), finding Claude (`CLAUDE_PID`, else from a hook's parent), reading a process's exact argv (`/proc` on Linux, sysctl on macOS), parsing the Bash tool shell's `eval '<command>'` like a shell, matching it to the guarded call (exact command, shell started after the call's PreToolUse), `command_shells` (the same match anywhere in the table, for reconciling after a crash: Claude may be gone and its shells adopted by init), killing a tree group by group (with the caller's table; without one, the pid it was given and the group that pid leads; while it waits, a table it can't read means asking each pid, never "all gone"; it says which processes went and which survived SIGKILL). |
-| `jobs.py` | Detached jobs, two supervisors and never both for one job: with the gateway available (`gateway.discover()`, feature `jobs`), `start()` hands the job to the gateway (`_start_gateway`: `POST /v1/jobs` with the session, `task_ref`, the idempotency key `ck:<tool_use_id>`, `on_pause`; one retry with the same key after an ambiguous try; once a try may have started it, the outcome is unknown whatever the retry gets: never a fallback) and records `owner: gateway` with the gateway's job id; state, tail and stop go through the contract (`_status_gateway`, `_tail_gateway`, `_stop_gateway` with `outcome` stopped / stop_failed / unknown), and the registry stores the last state the gateway reported (`note_gateway_states`, `_apply_view`; a job a new epoch doesn't list is `unknown`, `gone`). `is_live` counts a gateway job's live states and `unknown` (gone or not: it may still run), `is_final` only exited/failed/canceled, so unknown ones are never pruned nor reported stopped. Otherwise, checkpoint's own runner (each records its journal `task_id` and `on_cancel` policy, `interrupt` or `detach`; `detach()` releases one from its task): `sh` wrapper in its own session writing `exit_code`; states running / exited / killed / vanished / stop_failed (running while the wrapper or anything in its process group runs, also a wrapper whose command line isn't readable yet but that started with the job: just after `Popen` Linux can show it as `[sh]`; left as is when there is no process table). `job_stop` waits for the whole process group to go (SIGKILL after the grace period). The MCP server reaps the jobs it started (SIGCHLD), and `procs.alive` treats an unreaped zombie as dead, so another session can stop a job cleanly. Jobs get `job_env()`: the environment minus checkpoint's own pixi activation. With the gateway installed, the job's shell (`WRAPPER`) then sources its `env.sh` (`gateway_env()`: only a regular file you own, not writable by others, in a folder likewise; `CHECKPOINT_GATEWAY_ENV` overrides the path), after a trial run in a subshell, and writes `applied`/`failed` to `jobs/<id>/gateway_env`, which the registry's `gateway_env` picks up (`refused: <why>` when it wasn't passed). Finished jobs are pruned after 14 days. |
+| `jobs.py` | Detached jobs, two supervisors and never both for one job: with the gateway available (`gateway.discover()`, feature `jobs`), `start()` hands the job to the gateway (`_start_gateway`: `POST /v1/jobs` with the session, `task_ref`, the idempotency key `ck:<tool_use_id>`, `on_pause`; one retry with the same key after an ambiguous try; once a try may have started it, the outcome is unknown whatever the retry gets: never a fallback) and records `owner: gateway` with the gateway's job id; state, tail and stop go through the contract (`_status_gateway`, `_tail_gateway`, `_stop_gateway` with `outcome` stopped / stop_failed / unknown), and the registry stores the last state the gateway reported (`note_gateway_states`, `_apply_view`; a job a new epoch doesn't list is `unknown`, `gone`). `is_live` counts a gateway job's live states and `unknown` (gone or not: it may still run), `is_final` only exited/failed/canceled, so unknown ones are never pruned nor reported stopped. Only the person ends that wait: `release()` (the CLI's `forget-job <id>`; `/check:doctor` names the candidates) makes a job checkpoint has seen unknown for over `RELEASE_AFTER_DAYS` (7) `released`, final for checkpoint's records, its outcome still unknown. That age is `unknown_since`: `unknown_ts`, stored the first time the gateway couldn't be asked about the job (`refresh_all`) or a snapshot didn't list it (`_apply_view`, `note_gateway_states`) and cleared whenever the gateway reports on it (`_apply`), never the time checkpoint last asked; `release()` looks at the record again under the state lock (a report that landed since wins). Otherwise, checkpoint's own runner (each records its journal `task_id` and `on_cancel` policy, `interrupt` or `detach`; `detach()` detaches one from its task): `sh` wrapper in its own session writing `exit_code`; states running / exited / killed / vanished / stop_failed (running while the wrapper or anything in its process group runs, also a wrapper whose command line isn't readable yet but that started with the job: just after `Popen` Linux can show it as `[sh]`; left as is when there is no process table). `job_stop` waits for the whole process group to go (SIGKILL after the grace period). The MCP server reaps the jobs it started (SIGCHLD), and `procs.alive` treats an unreaped zombie as dead, so another session can stop a job cleanly. Jobs get `job_env()`: the environment minus checkpoint's own pixi activation. With the gateway installed, the job's shell (`WRAPPER`) then sources its `env.sh` (`gateway_env()`: only a regular file you own, not writable by others, in a folder likewise; `CHECKPOINT_GATEWAY_ENV` overrides the path), after a trial run in a subshell, and writes `applied`/`failed` to `jobs/<id>/gateway_env`, which the registry's `gateway_env` picks up (`refused: <why>` when it wasn't passed). An own-runner job's log keeps its last 32-64 MB (`state.JOB_LOG_KEEP_BYTES`): a watcher in the wrapper's background copies a log past half of that to `output.log.1` and empties it (O_APPEND: the job writes on at the new end), recorded in `jobs/<id>/log_rotated`; `public()` says how much earlier output was dropped (`log_truncated`, in job_status and job_tail) and `tail()` reads across the rotation. Finished jobs are pruned after 14 days. |
 | `mcp_server.py` | Hand-rolled stdio JSON-RPC (initialize, tools/list, tools/call, ping). Session id per call: the newest session record for `CLAUDE_PID` (so `/clear` is followed), else `CLAUDE_CODE_SESSION_ID`. Each tool carries `_meta: {"anthropic/alwaysLoad": true}` and `.mcp.json` sets `"alwaysLoad": true` (0.7.1: Claude Code 2.1.304 otherwise defers the tools behind ToolSearch; the cost is ~4.5 KB of schemas per request, and a session start waits for the server, at most a few seconds). |
-| `cli.py` | `status / pause / resume / doctor / summary / tasks / save / list` for the terminal helper (`$CHECKPOINT_HOME/checkpoint`, written at every session start) and `pixi run` in a checkout; `ingest`, `snap` and `status --session` for the hooks and the mod. |
-| `journal.py` | The durable journal: per task, append-only JSONL segments of canonical records with CRC32 and gap-free seq; flock (writers exclusive, readers shared); verifies segments incrementally from a head cache (every segment's content CRC checked, so damage in an older one is found); dedups (kind, op); starts a new segment after a bad tail; refuses to write behind a seq gap (`JournalDamaged`); fsync every N records and on request (F_FULLFSYNC on macOS); failure markers (`journal-errors/<sid>`). |
-| `sanitize.py` | Scrubbing before anything is journaled: token shapes, PEM blocks, URL credentials, auth headers, sensitive assignments/flags/JSON fields, sensitive field names (also written without separators: PGPASSWORD, APITOKEN); bounded summaries of tool inputs and results: never file contents (Read, Grep, Glob, WebFetch, WebSearch keep paths, counts and sizes; a Bash command's output only as sizes unless it is a test, build or check), edit strings, an unknown tool's raw input, or more than an unknown tool result's keys and size; whether a result is only a start (`background_of`) and the exit code it states (`stated_exit`). |
-| `capture.py` | The spool (fast.sh's and the mod's) into the journal (a prompt's op is its prompt_id plus its text's hash: a prompt typed mid-turn carries the turn's prompt_id; a task notification also becomes `background.result` records keyed by the start's tool_use_id; a TaskOutput/TaskStop result too): reads the index from its cursor, turns events into sanitized records, appends, then deletes payloads (a failed write leaves the spool as it was); orphans, cut payloads, index rotation; tasks and lineage (startup/clear start one, resume/fork/compact continue the parent's); git identity and the version a validation runs against (`snap`); `ingest_dead` for killed sessions. |
+| `cli.py` | `status / pause / resume / doctor / summary / tasks / save / list / diff / reconcile / export / stop / forget-job / prune / forget / purge / gateway` for the terminal helper (`$CHECKPOINT_HOME/checkpoint`, written at every session start) and `pixi run` in a checkout; `ingest`, `snap`, `doctor-py` and `status --session` for the hooks and the mod. |
+| `purge.py` | Deleting history on request: `forget(ref)` (the CLI's `forget <task>`, `/check:forget`) removes one task's journal, its exports in the state folder, its finished jobs and logs, and the records, spools and pause-time checkpoints of its sessions that belong to no other task (a session it shares with another task keeps its record, and its spool is journaled first and kept); refused while one of its sessions runs or is paused or a job of it runs. `purge()` removes everything in the state folder but what a live or paused session or a running job needs (a spool with no session record written in the last day is kept: a session from before any runtime; finished jobs of kept sessions and tasks stay), and lists it. Both refuse without a process table; the projects' `.work/` folders are only named, with the command that removes them. |
+| `journal.py` | The durable journal: per task, append-only JSONL segments of canonical records with CRC32 and gap-free seq; flock (writers exclusive, readers shared); verifies segments incrementally from a head cache (every segment's content CRC checked, so damage in an older one is found); dedups (kind, op); starts a new segment after a bad tail; refuses to write behind a seq gap (`JournalDamaged`); fsync every N records and on request (F_FULLFSYNC on macOS; `capture.ingest` requests it whenever it then deletes spool payloads); failure markers (`journal-errors/<sid>`). |
+| `sanitize.py` | Scrubbing before anything is journaled: token shapes (Telegram bot tokens too), PEM blocks, URL credentials, auth headers, sensitive assignments/flags/JSON fields, sensitive field names (also written without separators: PGPASSWORD, APITOKEN), and the command-line credentials only their program names (`_cli_secrets`: mysql/mariadb and mongo `-p<pw>` / `-p <pw>`, curl `-u user:<pw>` (bundled too: `-su`) and `-E/--cert file:<pw>`, `sshpass -p`, docker/podman/helm/nerdctl/az `login -p` (login as the subcommand, after global options), `redis-cli -a`, `htpasswd -b`, openssl `-k`/`-K`/`-pass pass:`, the ldap tools' `-w`, smbclient's `-U user%<pw>` and its password after the share, what `echo` pipes into `sudo -S`; `ssh -p`, `mkdir -p` and the like stay). The command line is cut into words by a scanner (`_cli_tokens`, `_word_end`: quotes, `$(...)` and backticks kept whole and balanced, a backslash-newline is a space; as the shell reads them, a `#` comment ends at its newline (its words are still read: a commented-out `# mysql -p<pw>` loses it) and a here-document body (`<<WORD`, `<<-WORD`, `<<'WORD'`, `<<"WORD"`, up to the line that is WORD; one never terminated is read on) is skipped, also inside `$(...)` (Claude Code's commit form), an unquoted one's `$(...)` still read; a contraction's apostrophe (`can't`, `it's`: after a letter, then s/t/re/ll/ve/m/d and a space, punctuation or the end) opens and closes no quote) and read after every separator, again in a command line quoted in another (`_inner_words`: a shell's `-c` string after its options, `-o pipefail` and `--` included; `su`/`script -c`; `vagrant ssh -c`; `eval`, `watch`, `tmux`; ssh's remote command; a double-quoted one as the command sees it, escaped quotes undone: `_cli_edits_dq`) and in what a command substitution runs (`$(...)` and backticks, also inside double quotes), up to 8 levels deep; then each line that names a program is read again on its own, on the text the first pass masked (a quote pairing across lines in prose, `O'Neil` here and a quote two lines on, hides no line between; a line inside a commit message or a here-document is read as a command line too: `fix: mysql -p handling` loses `handling`), and then each run of lines joined by a backslash-newline as one line (`curl -fsS \` / `-u user:<pw>` in a here-document's body); an apostrophe after a word's leading `-` is a quote (`-e's,a,b,'`), never a contraction; a program's options are looked for in its first 256 words (`_ARGS_MAX`, `_inner_words` and `_stdin_target` too) and the name and flag patterns are tried once per run of name characters, so a long word or line costs its length; patterns only, so exports say to review them before sharing; bounded summaries of tool inputs and results: never file contents (Read, Grep, Glob, WebFetch, WebSearch keep paths, counts and sizes; a Bash command's output only as sizes unless it is a test, build or check, and a failed one keeps only Claude Code's first line, `failure_mark`: the exit code or an interrupt), edit strings, an unknown tool's raw input, or more than an unknown tool result's keys and size; whether a result is only a start (`background_of`) and the exit code it states (`stated_exit`). |
+| `capture.py` | The spool (fast.sh's and the mod's) into the journal (a prompt's op is its prompt_id plus its text's hash: a prompt typed mid-turn carries the turn's prompt_id; a task notification also becomes `background.result` records keyed by the start's tool_use_id; a TaskOutput/TaskStop result too): reads the index from its cursor, turns events into sanitized records, appends, then deletes payloads (a failed write leaves the spool as it was); orphans, cut payloads, records the shell kept without contents (`checkpoint_meta`: one `recording.gap` per ingest), payloads it dropped over its cap (counted from its `recording.gap`), `.size` after each ingest, index rotation; tasks and lineage (startup/clear start one, resume/fork/compact continue the parent's); git identity and the version a validation runs against (`snap`); `ingest_dead` for killed sessions. |
 | `summary.py` | The recovery summary, deterministic from the journal: Goal, Latest instructions, Constraints & decisions, In flight / unknown, Plan, Validation (staleness against current hashes), Failures, Files changed, Done, Children, Lineage, Evidence; observed vs inferred; bounded (sections left out are named); the task list and "interrupted". A background start is linked to the end Claude Code reported later (`bg_result`: a task notification, TaskOutput/TaskStop), also for a call whose turn was aborted (no outcome at all); an intent without an outcome whose command a process runs now reads "still running" (process table). Recorded text is scrubbed again before it is clipped. |
-| `recovery.py` | PLAN-v4 phase 3. `reconcile(task, sid, checkpoint)`: the saved state (the checkpoint named, else the latest, else the journal's last record of each file) against now: files (changed outside the task / by the task since / deleted), git (HEAD moved and how, branch, newly dirty), validations (stale), instructions (then, since, the resuming message), operations in five classes, the task's own-runner jobs, lineage (original session, `claude --resume`, alive elsewhere or in this same process, concurrent sessions); `Recon.text()` the resume context, `.short()` the person's line, `record()` the `reconcile` journal record. `external_effect()` (push, remote, http write, deploy, publish, db, system, MCP). `list_data`/`list_text`, `diff`, `find_checkpoint`, `export` (rescrubbed bundle), `prune_tasks` (retention). Reads only: never writes files, the repository or transcripts. |
+| `recovery.py` | PLAN-v4 phase 3. `reconcile(task, sid, checkpoint)`: the saved state (the checkpoint named, else the latest, else the journal's last record of each file) against now: files (changed outside the task / by the task since / deleted), git (HEAD moved and how, branch, newly dirty), validations (stale), instructions (then, since, the resuming message), operations in five classes, the task's own-runner jobs, lineage (original session, `claude --resume`, alive elsewhere or in this same process, concurrent sessions); `Recon.text()` the resume context, `.short()` the person's line, `record()` the `reconcile` journal record. `external_effect()` (push, remote, http write, deploy, publish, db, system, MCP); `effect_of()` adds `unrecorded` for a command spooled without its contents and no outcome (`UNRECORDED`; all of them said in one never-cut line, `unrecorded_line`), and `returned_unrecorded()` reads one that returned as returned, its result unknown, never an unknown outcome unless it was in flight at a checkpoint. `list_data`/`list_text`, `diff`, `find_checkpoint`, `export` (rescrubbed bundle), `prune_tasks` (retention). Reads only: never writes files, the repository or transcripts. A reconcile reads the journal once (`Recon.view`, also for `summary.previous_run_ended`) and scrubs each text once (`sanitize.remembered()`, around the resume paths and export too); `hosts.command_hosts` skips commands that name no remote tool and remembers the rest. |
 | `hosts.py` | 0.7.0: the gateway hosts a task used (`used`: its gateway jobs and terminals, the gateway tools' `host`, `ssh NAME` / `NAME:` to a host the gateway lists) and each one against the gateway's snapshot now (`now`, `HostNow`: reachable, auth, runtime as the gateway reports them, "not reported" or "unknown" otherwise; `blocked()`; `identity_change()`). |
 | `authz.py` | 0.7.0: authorization references. `check_record` (the mod's tool.check verdict as a journal record: decision, rule, deciding hook, the gateway's right names read from its fixed wording by `gateway_rights`, never the text), `collect` (rules, gateway rights, asks and their answers, auto mode's denials, gateway accounts, dialogs, rights changes, permission modes), `refused_ops` (calls Claude Code refused: never dispatched), `summary_lines`, `check` (each against now: settings files, the gateway's snapshot). |
-| `gateway.py` | PLAN-v4 phase 4: the CONTRACT-v1 client ([CONTRACT-v1.md](CONTRACT-v1.md), `gateway.v1`). `discover()` (the discovery file: absent, off, unsafe, unreadable, dead, unknown_contract, mismatch, available; `hooks/env.sh doctor` makes the same checks in sh), `call()` over the Unix socket (HTTP/1.1, JSON, `"contract": 1`; errors are `unreachable` and `refused`, which certainly did nothing, or `ambiguous` and `protocol`, which may have), the calls (capabilities, snapshot, events, jobs, signal, pause, resume), `clean_event`/`clean_job`/`clean_host`/`clean_terminal` (the second layer: each kind's allowed fields, values of the gateway's allowlisted characters, and token-shaped ones scrubbed), `sync()` (the session's cursor: a new epoch re-reads the snapshot, events in seq order, `gw:<epoch>:<seq>` ops drop duplicates, the session's or task's jobs, terminals and dialog requests become journal records). |
+| `gateway.py` | PLAN-v4 phase 4: the CONTRACT-v1 client ([CONTRACT-v1.md](../CONTRACT-v1.md), `gateway.v1`). `discover()` (the discovery file: absent, off, unsafe, unreadable, dead, unknown_contract, mismatch, available; `hooks/env.sh doctor` makes the same checks in sh), `call()` over the Unix socket (HTTP/1.1, JSON, `"contract": 1`; errors are `unreachable` and `refused`, which certainly did nothing, or `ambiguous` and `protocol`, which may have), the calls (capabilities, snapshot, events, jobs, signal, pause, resume), `clean_event`/`clean_job`/`clean_host`/`clean_terminal` (the second layer: each kind's allowed fields, values of the gateway's allowlisted characters, and token-shaped ones scrubbed), `sync()` (the session's cursor: a new epoch re-reads the snapshot, events in seq order, `gw:<epoch>:<seq>` ops drop duplicates, the session's or task's jobs, terminals and dialog requests become journal records). |
 
 ## The gate
 
@@ -195,10 +200,41 @@ after the command's intent it ran (`lag_ms`), and `head_moved` when its HEAD
 isn't the one the hook read (the command moved it first). Measured cost on the not-paused path: about 1 ms per hook (median of
 40, against a copy with the spool calls removed; macOS, sh and dash).
 
+A payload waits in the spool unscrubbed, so it is kept whole only while
+Python is there or on its way (`ck_body`, once per hook: a runtime ready or an
+update's older env, a build running for less than an hour, or none tried
+yet). Otherwise (no pixi, a failed build, a build running for over an hour)
+a record is `{<top-level members>, "checkpoint_meta": {bytes, why}}` with
+`meta=1` on its index line: the payload cut into JSON tokens (strings whole)
+so that only top-level string members named in `CK_META_KEYS` (session,
+paths, event, tool, ids, decisions) are taken, never one nested in a tool's
+input or result; ingested later, such an event becomes its records with
+`payload_dropped`, a PostToolUse of Bash/Agent/Task a start whose result
+wasn't kept (`background: unknown`, never done; for Bash the summary says it
+returned and that its result isn't known, `recovery.returned_unrecorded`: by
+its command when its PreToolUse was recorded, else in one line for all of
+them; never an unknown outcome there, nor in flight; in flight at a
+checkpoint the reconciliation calls it an unknown outcome, never confirmed
+completed), and one `recording.gap`
+(`what: payloads`) per ingest, named in the summary's header. The SessionStart
+messages for no pixi and a failed setup say so. Ready, `ck_body` costs a
+`read` of `rt/<sid>` and two file tests (the overhead test measures the
+installed path too). Each spool keeps `spool/<sid>/.size` ("records bytes",
+updated with a `read` and a write per record; Python writes what is left
+after each ingest): past `CK_SPOOL_KEEP_COUNT` (10,000) records or
+`CK_SPOOL_KEEP_BYTES` (50 MB) `ck_spool_trim` drops the oldest payloads in
+index order down to half (one trimmer at a time, `.trim`), after spooling a
+`recording.gap` (`what: dropped`) that lists them; capture counts as dropped
+the listed payloads it finds gone (no "missing" problem) and the summary
+names the gap. At every session start `ck_spool_prune` removes the spools
+nothing was written to for `CK_SPOOL_KEEP_DAYS` (7) whose session's Claude
+process is gone (after the Python half's `ingest_dead` had them), also with
+no runtime at all.
+
 **Ingesting.** At the Python moments (the diagram above) `capture.ingest`
 reads the index from its cursor, turns events into records (`sanitize.py`
-first), appends, and only then deletes the payload files and moves the
-cursor: a write that fails leaves the spool as it was, records the failure
+first), appends and syncs (a full sync: the payloads are the only other
+copy), and only then deletes the payload files and moves the cursor: a write that fails leaves the spool as it was, records the failure
 (`journal-errors/<sid>`) and says so once in the hook's output; the status
 line ("recording FAILED"), `/check:status` and `/check:doctor` show it until a
 write works again. A spool that can't be written is said by the hook itself,
@@ -213,7 +249,11 @@ again the failure becomes history (`spool-errors/<sid>.last`,
 and `/check:status` too (0.7.1; before, a full-disk window left nothing). A
 payload whose index line never came
 (its hook died) is taken after a minute (`orphan`). The index rotates once
-ingested past 256 KiB. About 8,000 events per second (1,000 in ~130 ms).
+ingested past 256 KiB; with no runtime the shell's trim also moves it to
+`index.s<n>`, which an ingest reads before the current index (`.trimdone`
+names the ones the trim finished). The cursor stores the inode of the index
+it read, so one rotated away under it is read on from the cursor's offset.
+About 8,000 events per second (1,000 in ~130 ms).
 
 **Tasks and lineage.** A session started fresh (`startup`) or after `/clear`
 begins a task (`clear` names the previous session of the same Claude process
@@ -221,7 +261,15 @@ as its parent); `resume`, `fork` and `compact` continue the parent's task (the
 same session id, or the transcript's earlier session id). `/check:resume
 <task|last>` makes a session adopt a task. A session start ingests the spools
 of sessions whose Claude process is gone (killed), and lists the project's
-unfinished tasks; after a compaction, a fork or a `--resume`, the
+unfinished tasks (for the model); when one of them was interrupted (no
+clean end, its process gone) in the last 7 days, the person sees one line
+too, for the newest interrupted one (`hooks._crash_notice`, a systemMessage:
+the task, its goal, `claude --resume <id>` and `/check:resume <task>`), and
+`/check:status` lists them
+(`core.unfinished_tasks`). `last` (`core.find_task`) is the newest task in the
+project; asked from a session it is never that session's own task, and an
+interrupted one comes before a newer one that wasn't (the first message
+after a crash starts a task of its own). After a compaction, a fork or a `--resume`, the
 reconciliation and the recovery summary go into the context (after a clean
 exit only what changed since, and nothing when nothing did: reconciled and
 recorded either way). `claude --resume <id>` while another live Claude process
@@ -288,7 +336,13 @@ journal's last record of each file. It compares:
   (`external_effect`: a push, ssh/scp/rsync, an HTTP write, kubectl, helm,
   terraform, a deploy or publish, a database client, sudo; a non-read MCP
   tool) goes first under "Check first", with what to look at (`git ls-remote`
-  for a push) and "do not run it again until you know". Nothing ever says to
+  for a push) and "do not run it again until you know". A command spooled
+  without its contents (no runtime then) and with no outcome at all may have
+  been anything, so it counts as such an effect too; all of them are one
+  never-cut line ("N commands not recorded (no runtime then), seq a-b: check
+  their effects"), in "Interrupted operations" and the summary's In flight as
+  well; one that returned is no unknown outcome (unless it was in flight at
+  the checkpoint: its result unknown, never confirmed completed). Nothing ever says to
   redo a stage from the start. A resume checks what is still open, not the
   task's whole history (`_scope`; the summary keeps everything): a failed or
   interrupted call is left out once a later call doing the same (the same
@@ -342,14 +396,16 @@ the outcomes recorded; the pause lifted; the mod's `/check-cancel` holds every
 tool call while this runs, then ends the turn). Both leave the journal and
 move the session to a new task (`session.adopt` naming the old one); picking
 the task up again reopens it. `/check:stop <job>` stops one job (`job.stop`
-recorded) and says the outcome only: never the log's last lines, since both
+recorded; a gateway job through the gateway) and says the outcome only: never the log's last lines, since both
 routes answer straight into the model's context where nothing masks them (a
 job's log can hold what the gateway's env file exported); `job_tail` shows the
 log, and the gateway's hook masks that tool's result. The resume context
 names a job that ended while paused the same way. `/check:export` writes a bundle (0600): the summary
 and each checkpoint's summary rebuilt from the records scrubbed again, a
 journal excerpt (rescrubbed, sensitive keys dropped), references (paths, ids,
-`claude --resume` lines), never file contents or transcripts. Retention
+`claude --resume` lines), never file contents or transcripts; its first line
+(`_review`, `EXPORT_REVIEW`) says scrubbing is pattern-based and to review
+the file before sharing it. Retention
 (`prune_tasks`, from `state.prune`): finished tasks after
 `CHECKPOINT_KEEP_DAYS` (30), open ones after `CHECKPOINT_KEEP_OPEN_DAYS`
 (180), never one with a live or paused session or a running job, nothing
@@ -453,7 +509,8 @@ seen) and adds "Check first" items for a gateway that isn't available or
 runs on another machine than the task's jobs did.
 
 **Events.** `gateway.sync(sid)` keeps `CHECKPOINT_HOME/gateway/<sid>.json`
-(epoch, next seq, the jobs, terminals and dialog requests it follows). A
+(epoch, next seq, the jobs, terminals and dialog requests it follows;
+pruned with the session's other files, as is `gateway/<sid>.lock`). A
 new epoch (or the daemon's `reset`) re-reads the snapshot (`gateway.snapshot`
 record: hosts, workspaces, the session's or task's jobs and terminals, no
 command text) and marks a followed job it no longer lists `unknown`, `gone`
@@ -479,7 +536,8 @@ recovery tests) covers discovery (Python and sh agree), calls, delegated
 jobs (no second start after a lost answer, also when the retry finds the
 daemon gone or is refused), pause/resume/cancel/stop through the gateway
 (policies, once per pause, late delivery, no late pause before a resume,
-other sessions' jobs), unknown states (never stopped, never pruned), the
+other sessions' jobs), unknown states (never stopped, never pruned; released
+only by the person, `tests/ux_tests.py`), the
 journal (snapshots, duplicates, order, epochs, scrubbing) and independence
 (alone, versions [2] only, a dead daemon, disabled mid-session).
 `tests/acceptance_gateway.py` runs both plugins installed the normal way in
@@ -519,7 +577,7 @@ longer lists is said, and keeps a change its last `host.state` said. The
 `reconcile` record keeps each host's enums. The summary's "Jobs & gateway"
 lists the hosts the task used and the gateway's last report of each.
 
-**Authorization references** (brief §5, §7). Recorded by name and decision,
+**Authorization references**. Recorded by name and decision,
 never a reason, value or command: the mod's `tool.check` observer spools
 Claude Code's verdict for each real call (one with a `tool_use_id`) that a
 rule, a hook or an ask decided (`mod.tool.check`: decision, rule, hook; the
@@ -702,9 +760,8 @@ acknowledgement reports):
 In every run the pause flag was written, the status line switched from
 `check: recording` to `check: paused · ...`, and the next message typed
 resumed (flag cleared, status back to recording). (Since 0.7.3 `check:
-recording` is the footer's label and the status line shows only the pause.) The driver is
-`scratchpad/upgrade/ck-pack/drv/ckpause.py` of the v4 work (built on the
-prototype in `scratchpad/upgrade/tui/`; outside the repo); the repo's own TUI
+recording` is the footer's label and the status line shows only the pause.) The driver
+was a one-off script of the v4 work, not kept in the repo; the repo's own TUI
 harness is `tests/tui/`.
 
 Measured for phase 3 (2.1.301, the TUI harness):

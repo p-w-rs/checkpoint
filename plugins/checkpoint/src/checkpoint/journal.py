@@ -36,8 +36,9 @@ to: a segment whose whole records no longer match their cached CRC is read
 again (about 6 ms per writer for a 25 MB journal, measured).
 
 Durability: one os.write per batch (O_APPEND), fsync every FSYNC_EVERY
-records, and on request (`sync=True`: checkpoints, pause, Stop, SessionEnd),
-where macOS gets F_FULLFSYNC. A new segment's folder is synced too. Nothing
+records, and on request (`sync=True`: checkpoints, pause, Stop, SessionEnd,
+and every ingest that then deletes spool payloads), where macOS gets
+F_FULLFSYNC. A new segment's folder is synced too. Nothing
 is reported saved before that returns; write errors (ENOSPC, EIO, EFBIG) are
 raised as JournalError and recorded for /check:doctor, the status line and the
 next hook output (capture.py, record_failure).

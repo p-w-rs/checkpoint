@@ -73,6 +73,12 @@ export function parseSelfPause(text: string): SelfPause | null {
   return null
 }
 
+/** How a paused session is resumed, as the status line and the pause ack say
+ * it: a message the person types does, and so does any slash command but
+ * checkpoint's own (`typedResumes`: another plugin's skill asks Claude to
+ * work, which the held gate would refuse anyway), and /check:resume. */
+export const RESUME_HOW = 'type a message (any non-/check command resumes) or /check:resume'
+
 /** Does a prompt the person typed resume a paused session? As
  * hooks.handle_prompt decides with the flag on disk: `/check:resume` does,
  * the other /check:* commands (pause, status, doctor, help) and the `pause`
@@ -85,7 +91,7 @@ export function typedResumes(text: string, command?: { name: string }): boolean 
     return !(n.startsWith('check:') || n.startsWith('check-'))
   }
   const t = (text || '').trim()
-  const cmd = /^\/check:(pause|resume|status|help|doctor|save|list|diff|cancel|stop|complete|export)(?:\s|$)/.exec(t)
+  const cmd = /^\/check:(pause|resume|status|help|doctor|save|list|diff|cancel|stop|complete|export|forget)(?:\s|$)/.exec(t)
   if (cmd) return cmd[1] === 'resume'
   return !/^pause(?:\s+(now|interrupt|all|all\s+now|now\s+all|all\s+interrupt|interrupt\s+all))?[.!]?$/i.test(t)
 }
@@ -216,7 +222,7 @@ export function ackText(r: PauseReport): string {
     const gw = r.jobs.filter(j => j.supervisor === 'gateway')
     if (gw.length) lines.push(`Gateway jobs, not told of the pause (their pause policies didn't apply): ${gw.map(j => `${j.name} (${j.id})`).join(', ')}.`)
   }
-  lines.push('Tool calls stay held until you resume: type a message, or /check:resume.')
+  lines.push(`Tool calls stay held until you resume: ${RESUME_HOW}.`)
   return lines.join('\n')
 }
 
@@ -231,7 +237,7 @@ export const RUNTIME_WORDS: readonly string[] = ['ready', 'older', 'building', '
  * unknown state uses the status line (`warn: true`). `runtime` is a
  * RUNTIME_WORDS word, '' when nothing could say. */
 export function statusOf(s: { paused: boolean; runtime: string; recordingFailed: boolean }): { text: string; warn: boolean } {
-  if (s.paused) return { text: 'paused · type a message or /check:resume to resume', warn: true }
+  if (s.paused) return { text: `paused · ${RESUME_HOW}`, warn: true }
   switch (s.runtime) {
     case 'building':
     case 'missing':
