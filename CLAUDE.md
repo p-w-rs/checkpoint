@@ -20,7 +20,6 @@ convention; `.work/` is gitignored here).
 
 ```
 .claude-plugin/marketplace.json     marketplace "checkpoint" -> ./plugins/checkpoint
-.github/workflows/test.yml          CI: the suite under sh and dash, Linux and macOS
 plugins/checkpoint/
   .claude-plugin/plugin.json        name "check", version (bump it for every release)
   .mcp.json                         MCP server "jobs" (sh hooks/env.sh mcp: the env's python on run.py server;
@@ -552,5 +551,7 @@ messages); use `git commit -F file` if a message mentions them.
   settings.
 - Plain, concise docs. No license file and no license wording (don't call
   the project open source).
+- A hobby project: no CI/CD (no GitHub Actions) and no enterprise-style
+  release process.
 - Docs stay generic: no employer, work logins, emails, internal hosts,
   personal paths, pids or the user's live state.

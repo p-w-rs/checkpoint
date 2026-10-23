@@ -29,10 +29,6 @@ The suite is hermetic: state, plugin data and Claude Code's config are temp
 folders, Claude processes are fakes, and nothing touches the network or a
 real gateway. The rules are in [CLAUDE.md](../../CLAUDE.md#commands).
 
-CI (`.github/workflows/test.yml`) runs the suite under sh and dash on Linux
-(x86-64, ARM64) and macOS (Apple silicon, Intel), with the oldest supported
-pixi on one Linux job, and weekly with the newest pixi and Claude Code.
-
 Important fixes get a mutation check: undo the fix on a scratch copy, see a
 named check fail, restore.
 
@@ -104,6 +100,6 @@ pixi 0.81.0 / 0.82.0; scratch configs and the fake model API throughout).
   40, authz 18 of 18, gateway 27 of 27 (with gate 0.10.0), independence 49 of
   49, durability 29 of 29; on Linux: journal 28 of 28, recovery 40 of 40,
   gateway 27 of 27.
-- Not run: a first CI run, an install from GitHub of the released version,
+- Not run: an install from GitHub of the released version,
   the desktop app (by hand; the harness can't drive it).
 
