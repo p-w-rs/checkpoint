@@ -290,7 +290,7 @@ the design's in [docs/dev/ARCHITECTURE.md](docs/dev/ARCHITECTURE.md).
 | Update | `claude plugin marketplace update checkpoint`, then `claude plugin update check@checkpoint`; then `/reload-plugins` or a new session |
 | Turn off for now | `claude plugin disable check@checkpoint` (back on: `enable`) |
 | Uninstall | `claude plugin uninstall check@checkpoint` (`--keep-data` keeps the built Python) |
-| Forget the marketplace | `claude plugin marketplace remove checkpoint` |
+| Forget the marketplace | `claude plugin marketplace remove checkpoint` (also uninstalls the plugin) |
 
 In Claude Code, `/plugin` opens the same actions as a menu. An update that
 changes the runtime builds it in the background while the old one keeps
