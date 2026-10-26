@@ -109,6 +109,15 @@ def ux_rt(tag, state_word):
     return env, Path(env["CHECKPOINT_HOME"])
 
 
+def ux_retry_over(env, t0):
+    """The retry a session start (begun at T0) kicked runs in the background and may not have started when
+    the hook returns: wait until it has rewritten install.log (under its lock) and let the lock go. While a
+    build runs, payloads are kept whole."""
+    envd = Path(env["CLAUDE_PLUGIN_DATA"]) / "envs" / LOCK_SHA12
+    return wait_for(lambda: (envd / "install.log").stat().st_mtime >= t0 and not Path(f"{envd}.building").exists(),
+                    20)
+
+
 def ux_spool_files(home, sid):
     d = home / "spool" / sid
     return sorted(d.glob("*.ev")) if d.is_dir() else []
@@ -155,9 +164,10 @@ UXD = UX / "proj dé"     # a space and a non-ASCII letter
 UXD.mkdir()
 ENVF, HOMEF = ux_rt("failed", "failed")
 SF = "sess-ux-failed-1"
+_t0 = time.time()
 r = ux_run(UXP / "hooks" / "fast.sh", ["SessionStart"], ENVF, ux_pay(SF, UXD, source="startup"))
 # Its retry (started in the background) is over before the calls: while a build runs, payloads are kept whole.
-wait_for(lambda: not Path(f"{ENVF['CLAUDE_PLUGIN_DATA']}/envs/{LOCK_SHA12}.building").exists(), 20)
+ux_retry_over(ENVF, _t0)
 check("a failed setup: SessionStart says so, and that until then only which tools ran is recorded, not their contents",
       lambda: "setting up its runtime failed" in sys_msg(r) and "not their contents" in sys_msg(r))
 ux_events(ENVF, SF, UXD)
@@ -202,8 +212,9 @@ check("...the shell's size count goes back to what is left after the ingest",
       lambda: (HOMEF / "spool" / SF / ".size").read_text().split() == ["0", "0"])
 
 ENVN, HOMEN = ux_rt("nopixi", "nopixi")
+_t0 = time.time()
 r = ux_run(UXP / "hooks" / "fast.sh", ["SessionStart"], ENVN, ux_pay("sess-ux-np", UXD, source="startup"))
-wait_for(lambda: not Path(f"{ENVN['CLAUDE_PLUGIN_DATA']}/envs/{LOCK_SHA12}.building").exists(), 20)
+ux_retry_over(ENVN, _t0)
 ux_events(ENVN, "sess-ux-np", UXD)
 check("no pixi: SessionStart says only which tools ran is recorded; the records say why (pixi not found), no contents",
       lambda: "not their contents" in sys_msg(r) and not ux_hits(UX_CANARIES, HOMEN / "spool")
@@ -622,8 +633,9 @@ check("...and through /check:resume last in that session: it picks up another ta
 # A command spooled while no runtime was there (should-fix 9).
 ENVU, HOMEU = ux_rt("unrec", "nopixi")
 SU = "sess-ux-unrecorded"
+_t0 = time.time()
 ux_run(UXP / "hooks" / "fast.sh", ["SessionStart"], ENVU, ux_pay(SU, UXD, source="startup"))
-wait_for(lambda: not Path(f"{ENVU['CLAUDE_PLUGIN_DATA']}/envs/{LOCK_SHA12}.building").exists(), 20)
+ux_retry_over(ENVU, _t0)
 ux_run(UXP / "hooks" / "fast.sh", ["UserPromptSubmit"], ENVU, ux_pay(SU, UXD, prompt="ship it", prompt_id="u1"))
 for _tid, _tool, _inp in (("ub1", "Bash", {"command": "git push origin main"}), ("ur1", "Read", {"file_path": "/x/a"})):
     ux_run(UXP / "hooks" / "fast.sh", ["PreToolUse"], ENVU, ux_pay(SU, UXD, hook_event_name="PreToolUse", tool_name=_tool,
@@ -662,8 +674,9 @@ def ux_flood(sid, real, clones, post=True):
         tool_input={"command": f"git push origin b{tid}"}, **({"tool_response": {"stdout": "", "stderr": "",
                                                                                   "interrupted": False}}
                                                               if ev == "PostToolUse" else {})))
+    t0 = time.time()
     ux_run(UXP / "hooks" / "fast.sh", ["SessionStart"], ENVF, ux_pay(sid, UXD, source="startup"))
-    wait_for(lambda: not Path(f"{ENVF['CLAUDE_PLUGIN_DATA']}/envs/{LOCK_SHA12}.building").exists(), 20)
+    ux_retry_over(ENVF, t0)
     ux_run(UXP / "hooks" / "fast.sh", ["UserPromptSubmit"], ENVF, ux_pay(sid, UXD, prompt="ship them", prompt_id="f1"))
     for i in range(real):
         run("PreToolUse", f"f{i}")

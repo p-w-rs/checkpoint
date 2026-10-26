@@ -92,19 +92,30 @@ doctor)
     ver=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" 2>/dev/null | head -n 1)
     echo "plugin: check ${ver:-?} at $(cd "$root" 2>/dev/null && pwd -P)"
     if p=$(ck_find_pixi); then
-        pv=$("$p" --version 2>/dev/null | sed -n 's/^pixi[[:space:]]*\([0-9][0-9.]*\).*/\1/p' | head -n 1)
+        pv=$(ck_pixi_version "$p")
         # checkpoint supports the latest pixi; one older than requires-pixi is called out
-        verdict=$(awk -v v="${pv:-0}" -v lo="$CK_PIXI_MIN" '
-            function n(s,  a) { split(s, a, "."); return a[1] * 1000000 + a[2] * 1000 + a[3] }
-            BEGIN { if (v == "0") print "; version unknown";
-                  else if (n(v) < n(lo)) print "; older than this version needs (" lo "): update it with pixi self-update, or your package manager (Homebrew, MacPorts)" }')
+        verdict=
+        if [ -z "$pv" ]; then
+            verdict="; version unknown"
+        elif ck_pixi_older "$pv"; then
+            verdict="; older than this version needs ($CK_PIXI_MIN): update it with $CK_PIXI_UPDATE"
+        fi
         echo "pixi: $p (${pv:-?}$verdict)"
     else
         echo "pixi: not found (install the latest from https://pixi.sh)"
     fi
     case $(ck_state) in
     ready) rs="ready" ;;
-    older) rs="building a new env for this version; the previous one runs meanwhile ($(ck_older))" ;;
+    older)
+        # ck_state says older whatever this version's build is doing
+        if ck_lock_alive; then
+            rs="building a new env for this version; the previous one runs meanwhile ($(ck_older))"
+        elif [ -f "$ENVD/install.log" ]; then
+            rs="this version's env failed to build: $(ck_fail_line) (log: $ENVD/install.log; retried at the next session start); the previous one runs meanwhile ($(ck_older))"
+        else
+            rs="this version's env isn't built yet; the previous one runs meanwhile ($(ck_older))"
+        fi
+        ;;
     building) rs="building (first run; log: $ENVD/install.log)" ;;
     failed) rs="setup failed: $(ck_fail_line) (log: $ENVD/install.log; retried at the next session start)" ;;
     nopixi) rs="missing, and pixi isn't installed" ;;

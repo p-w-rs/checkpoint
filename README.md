@@ -19,7 +19,7 @@ Claude gets this first (abridged):
          - 1 file(s) changed outside this task since checkpoint c_01k8...: app/models.py (...) never revert them.
 ```
 
-Plugin `check` 0.9.0, marketplace `checkpoint`. It works alone; with the
+Plugin `check` 0.9.1, marketplace `checkpoint`. It works alone; with the
 [gateway](https://github.com/p-w-rs/gateway) plugin, long jobs run under the
 gateway's supervision and the hosts a task used are checked before a resume.
 
@@ -299,7 +299,7 @@ the design's in [docs/dev/ARCHITECTURE.md](docs/dev/ARCHITECTURE.md).
 | Update | `claude plugin marketplace update checkpoint`, then `claude plugin update check@checkpoint`; then `/reload-plugins` or a new session |
 | Turn off for now | `claude plugin disable check@checkpoint` (back on: `enable`) |
 | Uninstall | `claude plugin uninstall check@checkpoint` (`--keep-data` keeps the built Python) |
-| Forget the marketplace | `claude plugin marketplace remove checkpoint` (also uninstalls the plugin) |
+| Forget the marketplace | `claude plugin marketplace remove checkpoint` (also uninstalls the plugin and deletes its data folder: the built Python, even one kept with `--keep-data`) |
 
 In Claude Code, `/plugin` opens the same actions as a menu. An update that
 changes the runtime builds it in the background while the old one keeps
@@ -340,13 +340,19 @@ gateway, the state folder and any stuck gateway job.
   then checkpoint records only which tools ran.
 - **`check: runtime setup FAILED`.** The doctor shows pixi's error. The setup
   is retried at every session start.
+- **pixi too old.** The session start and the doctor say so. Update it
+  (`pixi self-update`, or your package manager), then start a new session.
+  After a plugin update, checkpoint keeps running on its previous runtime
+  until then.
 - **`check: recording FAILED`.** Usually a full disk. Events that couldn't
   be saved at all are lost; a failed journal write is redone from the spool.
   Free space and recording resumes by itself, with any gap noted.
 
 ## Status
 
-0.9.0 was tested on macOS (Apple silicon) and Debian 13 (ARM64) with Claude
+0.9.1 changes only setup messages and docs (tested on macOS: the suite and
+the live run with all three plugins). 0.9.0 was tested on macOS (Apple
+silicon) and Debian 13 (ARM64) with Claude
 Code 2.1.310 and pixi 0.83: the test suite, and live Claude Code sessions
 driven against a stand-in model, alone and with the gateway and pixi-guard;
 the suite also on Intel macOS packages through Rosetta. Not tested: the

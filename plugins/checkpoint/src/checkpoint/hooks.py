@@ -208,6 +208,12 @@ def session_main() -> int:
             msg = ("checkpoint: its gate ran degraded (" + news[0] + (f"; {len(news) - 1} more" if len(news) > 1 else "")
                    + "). /check:status and /check:doctor have details.")
             extra["systemMessage"] = (extra["systemMessage"] + " " + msg) if extra.get("systemMessage") else msg
+        # fast.sh's note on the runtime (an update's env that this pixi can't build), set by it alone.
+        note, note_ctx = os.environ.get("CHECKPOINT_START_MSG", ""), os.environ.get("CHECKPOINT_START_CTX", "")
+        if note_ctx:
+            text += "\n" + note_ctx
+        if note:
+            extra["systemMessage"] = (extra["systemMessage"] + " " + note) if extra.get("systemMessage") else note
         _emit(_with_failure(_ctx("SessionStart", text, **extra), res))
     except Exception as e:  # noqa: BLE001
         print(f"checkpoint: SessionStart failed: {e}", file=sys.stderr)

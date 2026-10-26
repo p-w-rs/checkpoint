@@ -659,7 +659,9 @@ keeps running (the code is stdlib only); envs unused for 7 days are removed.
 
 - **Who builds.** The async SessionStart hook (`env.sh ensure`), and the sync
   SessionStart, which never waits: with no env it starts a detached build,
-  says "first-time setup is running" once, and answers fail-safe meanwhile.
+  says once which state setup is in (running, failed, no pixi, or a pixi
+  too old: how to update it), on screen and in Claude's context, and answers
+  fail-safe meanwhile.
   While an update's env builds the previous one runs: the mod says
   "recording · updating its runtime in the background", and its Python
   commands (`/check-save`, `/check-list`, ...) use it (0.7.1; they used to
@@ -699,18 +701,27 @@ keeps running (the code is stdlib only); envs unused for 7 days are removed.
   build is said at the next session start with its reason (the log's first
   line starting with `Error`, pixi's summary, else its last line that isn't
   blank: pixi's output ends with a blank line), retried at every session
-  start, and shown by `/check:doctor`.
+  start, and shown by `/check:doctor`. An update's failed build, while the
+  previous env runs, is shown only by `/check:doctor` ("this version's env
+  failed to build"), unless pixi is too old (below).
 - **Read-only plugin folder.** The copies of `pixi.toml` and `pixi.lock`
   would take the plugin's modes; a build removes old copies first and makes
   the new ones writable, so an attempt after a failed or killed one doesn't
   fail at its copy (it once did, for good).
 - **pixi versions.** The latest pixi is the supported one. `requires-pixi =
   ">=0.83.0"` is the pixi that made the lock (the newest then), moved with
-  every relock: an older pixi refuses the manifest ("update pixi to a version
-  that satisfies '>=0.83.0'"), so the setup fails and says so;
-  `/check:doctor` shows pixi's version and calls out one below it
-  (`CK_PIXI_MIN`). Python is unpinned (`python = "*"`): the lock holds the
-  newest from conda-forge (`pixi update` moves it).
+  every relock: an older pixi refuses the manifest ("this project requires
+  pixi '>=0.83.0', but you have pixi 0.81.0"), so the setup fails. The
+  session start and `/check:doctor` call out a pixi below `CK_PIXI_MIN` and
+  say how to update it (`CK_PIXI_UPDATE`). The session start checks
+  (`ck_pixi_too_old`) whenever this version's env isn't ready, whatever its
+  build's state: with no runtime, in `degraded_session`; while an update
+  runs on the previous env, fast.sh passes the note to Python's answer
+  (`CHECKPOINT_START_MSG` and `_CTX`, which only fast.sh sets). The mod's
+  label still says "updating its runtime in the background" then.
+  `pixi --version` gets `CK_PIXI_VERSION_WAIT` (5 s), then is killed.
+  Python is unpinned (`python = "*"`): the lock holds the newest from
+  conda-forge (`pixi update` moves it).
 - **Private files.** `run.py` and every sh script run under umask 077:
   `CHECKPOINT_HOME` 0700, its files 0600 (a home folder readable by others
   is made private). Jobs and git get the user's own umask back

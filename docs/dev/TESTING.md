@@ -87,6 +87,14 @@ On the VM, the concurrency checks last ran on 0.7.1, and the permission and
 either-plugin-alone checks on an earlier 0.7.3 build with a mod change since
 reverted.
 
+## 0.9.1 verification
+
+Run on 2026-10-26 (Claude Code 2.1.310 and pixi 0.83.0 on macOS arm64):
+the suite, 1151 passed under sh and 1145 under dash; a test that fails
+without the change for every fix; the acceptance independence script with
+the gateway 0.11.1 and pixi-guard 0.4.1 trees, 96 of 96. Not rerun for the
+patch: Linux, Rosetta and the other acceptance scripts (0.9.0's runs below).
+
 ## 0.9.0 verification
 
 Run on 2026-10-24 and 25 (Claude Code 2.1.310, the newest then, on macOS and
@@ -111,8 +119,11 @@ throughout).
   gateway 27 of 27 (with gate 0.11.0), independence 96 of 96 (checkpoint,
   the gateway and pixi-guard alone, in pairs and all three: 11 parts),
   durability 29 of 29; on Linux: independence 96 of 96.
-- Not run: an install from GitHub of the released version, the desktop app
-  (by hand; the harness can't drive it).
+- The install from GitHub of the released version (0a51157, 2026-10-26): on
+  macOS, untagged and tag-pinned installs, the uninstall forms, the update
+  from 0.8.0, and live sessions with checkpoint and pixi-guard and with all
+  three; on the Debian VM, an install of all three and the same live checks.
+- Not run: the desktop app (by hand; the harness can't drive it).
 
 ## 0.8.0 verification
 

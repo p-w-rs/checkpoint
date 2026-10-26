@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.1 (2026-10-26)
+
+- While the runtime isn't ready, the session start tells Claude which state
+  setup is in (running, failed, no pixi, or a pixi too old) and what to tell
+  you, instead of "still setting up" in every case.
+- A pixi older than this version needs: the session start says so and how
+  to update it (`pixi self-update`, or your package manager: Homebrew,
+  MacPorts), instead of pixi's error and "retried at every session start".
+  This includes a plugin update, while checkpoint runs on its previous
+  runtime: that session start said nothing. 0.9.0's changelog promised
+  this; only `/check:doctor` said it.
+- `/check:doctor` during an update tells a failed build of the new runtime
+  and one not started yet from a build that is running (it said "building"
+  in all three).
+- The session start waits at most 5 s for `pixi --version`.
+- The no-pixi message says to start a new session, as Claude is told, not
+  to restart Claude Code.
+- README: removing the marketplace also deletes the plugin's data folder,
+  the built Python included, even one kept with `--keep-data`. A
+  Troubleshooting entry for a pixi that is too old.
+
 ## 0.9.0 (2026-10-26)
 
 Only the latest Claude Code and pixi are supported, and nothing is kept for

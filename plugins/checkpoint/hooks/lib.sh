@@ -16,6 +16,8 @@
 
 CK_ENV_KEEP_DAYS=7          # an env unused this long is removed (state.ENV_KEEP_DAYS)
 CK_PIXI_MIN=0.83.0          # pixi.toml requires-pixi: the pixi that made pixi.lock; an older one refuses the manifest
+CK_PIXI_UPDATE="pixi self-update, or your package manager (Homebrew, MacPorts)"   # how to update a too-old one (words for the user)
+CK_PIXI_VERSION_WAIT=5      # seconds `pixi --version` may take (a session start waits for it), then it is killed
 
 # The user's home from the password database (as state.gateway_env_path()):
 # Claude Code may run with HOME pointing elsewhere.
@@ -194,6 +196,40 @@ ck_take_lock() {
 }
 
 ck_find_pixi() { sh "$root/hooks/pixi.sh" --check 2>/dev/null; }
+
+# pixi's version (x.y.z) from `PIXI --version`, or "" when it says none
+# within CK_PIXI_VERSION_WAIT seconds (a hung one is killed, as py_to does).
+ck_pixi_version() {
+    {
+        "$1" --version 2>/dev/null </dev/null &
+        _ckvp=$!
+        _ckvn=0
+        while kill -0 "$_ckvp" 2>/dev/null; do
+            if [ "$_ckvn" -ge $((CK_PIXI_VERSION_WAIT * 50)) ]; then
+                kill "$_ckvp" 2>/dev/null
+                break
+            fi
+            sleep 0.02
+            _ckvn=$((_ckvn + 1))
+        done
+    } | sed -n 's/^pixi[[:space:]]*\([0-9][0-9.]*\).*/\1/p' | head -n 1
+}
+
+# 0 when VERSION is older than CK_PIXI_MIN (an empty one is not).
+ck_pixi_older() {
+    awk -v v="$1" -v lo="$CK_PIXI_MIN" '
+        function n(s,  a) { split(s, a, "."); return a[1] * 1000000 + a[2] * 1000 + a[3] }
+        BEGIN { if (v != "" && n(v) < n(lo)) exit 0; exit 1 }'
+}
+
+# The pixi found's version when it is too old for this version (a build can
+# only fail), else "" (also with no pixi, or one that gives no version).
+ck_pixi_too_old() {
+    _ckp=$(ck_find_pixi) || return 0
+    _ckv=$(ck_pixi_version "$_ckp")
+    if ck_pixi_older "$_ckv"; then printf '%s' "$_ckv"; fi
+    return 0
+}
 
 # A finished attempt left its log but no .ready, and nobody builds now.
 ck_build_failed() { [ -f "$ENVD/install.log" ] && [ ! -e "$ENVD/.ready" ] && ! ck_lock_alive; }

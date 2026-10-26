@@ -331,16 +331,49 @@ queued_targets_me() {
     return 0
 }
 
+# The words for a pixi too old for this version (VERSION from
+# ck_pixi_too_old), the same in both session starts: old (what is wrong) and
+# upd (what Claude tells the user, with CK_PIXI_UPDATE's words).
+pixi_old_words() {
+    old="pixi $1 is older than this version of checkpoint needs ($CK_PIXI_MIN)"
+    upd="Tell the user once to update pixi and start a new session; how to update it: $CK_PIXI_UPDATE."
+}
+
 # The session's start while no runtime is ready: start the build in the
-# background and say so once; pausing works meanwhile (this script).
+# background and say once which state it is in, to the user and to Claude
+# alike, with what to do: no pixi, a pixi older than CK_PIXI_MIN (its build
+# can only fail, whatever ck_state says), a failed setup, or one running.
+# The state and the failure's line are read before the retry starts (it
+# takes the lock and empties install.log: a failed setup read as running or
+# "(no output)"), pixi's version after. Pausing works meanwhile (this script).
 degraded_session() {
+    s=$(ck_state)
+    fail=
+    [ "$s" = failed ] && fail=$(ck_fail_line)
     ck_kick retry
-    case $(ck_state) in
-    nopixi) msg="checkpoint: pixi not found, so checkpoint can't set itself up (no trackers or job tools; pausing still works; until then it records which tools ran, not their contents). Install pixi from https://pixi.sh, then restart Claude Code." ;;
-    failed) msg="checkpoint: setting up its runtime failed ($(ck_fail_line)); it is retried at every session start. Pausing still works; until then it records which tools ran, not their contents. /check:doctor has details (log: $ENVD/install.log)." ;;
-    *) msg="checkpoint: first-time setup is running in the background (usually under a minute). Pausing works meanwhile; trackers and the job tools start once it is done." ;;
+    oldpx=
+    [ "$s" = nopixi ] || oldpx=$(ck_pixi_too_old)
+    [ -n "$oldpx" ] && s=oldpixi
+    case $s in
+    nopixi)
+        msg="checkpoint: pixi not found, so checkpoint can't set itself up (no trackers or job tools; pausing still works; until then it records which tools ran, not their contents). Install pixi from https://pixi.sh, then start a new session."
+        ctx="checkpoint (plugin) can't set up its runtime: pixi isn't installed, so its tracker notes and job tools aren't available. Tell the user once to install pixi from https://pixi.sh and start a new session."
+        ;;
+    oldpixi)
+        pixi_old_words "$oldpx"
+        msg="checkpoint: can't set up its runtime: $old. Update pixi: $CK_PIXI_UPDATE; then start a new session. Pausing still works; until then it records which tools ran, not their contents. /check:doctor has details (log: $ENVD/install.log)."
+        ctx="checkpoint (plugin) can't set up its runtime: $old, so its tracker notes and job tools aren't available. $upd"
+        ;;
+    failed)
+        msg="checkpoint: setting up its runtime failed ($fail); it is retried at every session start. Pausing still works; until then it records which tools ran, not their contents. /check:doctor has details (log: $ENVD/install.log)."
+        ctx="checkpoint (plugin) couldn't set up its runtime (setup failed: $fail), so its tracker notes and job tools aren't available yet; a retry is running in the background now, and setup is retried at every session start. Tell the user once that checkpoint's setup failed and /check:doctor shows why."
+        ;;
+    *)
+        msg="checkpoint: first-time setup is running in the background (usually under a minute). Pausing works meanwhile; trackers and the job tools start once it is done."
+        ctx="checkpoint (plugin) is still setting up its runtime in the background, so its tracker notes and job tools aren't available yet; they start once setup is done."
+        ;;
     esac
-    ctx="checkpoint (plugin) is still setting up its runtime, so its tracker notes and job tools aren't available yet. If a tool call is denied because the session is paused, don't start new work: end your turn with one line saying you're paused."
+    ctx="$ctx If a tool call is denied because the session is paused, don't start new work: end your turn with one line saying you're paused."
     paused && ctx="$ctx This session is PAUSED. The user's next message resumes it."
     printf '{"systemMessage":"%s","hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
         "$(esc "$msg")" "$(esc "$ctx")"
@@ -425,8 +458,23 @@ SessionStart)
     CHECKPOINT_ENVD=$ENVD
     write_helper
     errf="$st/session-start.err"
+    # Python adds these to its answer (hooks.session_main), and nothing else
+    # sets them: a note on the runtime, for the user and for Claude.
+    CHECKPOINT_START_MSG=
+    CHECKPOINT_START_CTX=
+    export CHECKPOINT_START_MSG CHECKPOINT_START_CTX
     if ck_python; then
-        [ -n "$CKPX" ] && ! ck_ready && ck_kick retry # an update's env: built meanwhile
+        if [ -n "$CKPX" ] && ! ck_ready; then
+            # An update's env: built meanwhile, while the previous one runs.
+            # A pixi too old for this version can only fail that build.
+            ck_kick retry
+            oldpx=$(ck_pixi_too_old)
+            if [ -n "$oldpx" ]; then
+                pixi_old_words "$oldpx"
+                CHECKPOINT_START_MSG="checkpoint: can't set up this version's runtime: $old, so it runs on its previous runtime meanwhile. Update pixi: $CK_PIXI_UPDATE; then start a new session. /check:doctor has details."
+                CHECKPOINT_START_CTX="checkpoint (plugin) can't set up this version's runtime: $old; it runs on its previous runtime meanwhile. $upd"
+            fi
+        fi
         [ -n "$CKPX" ] && ck_ready && : > "$ENVD/.used" 2>/dev/null
         out=$(py_to "$deadline" hook-session)
         rc=$?

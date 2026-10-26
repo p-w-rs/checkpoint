@@ -2499,25 +2499,30 @@ check("...SessionStart shows the error, that it's retried, and that pausing stil
       and "Pausing still works" in msg)
 # pixi's real error (a pixi.toml changed without its lock; pixi 0.81.0, these
 # exact bytes) ends with a blank line: the reason is its "Error" line, not the
-# last line (an empty "( )" once).
+# last line (an empty "( )" once). The fake says it is CK_PIXI_MIN: an older
+# one gets the update advice instead (below).
 MULTI = TMP / "multihome"
 (MULTI / ".pixi" / "bin").mkdir(parents=True)
 (MULTI / ".pixi" / "bin" / "pixi").write_text(
-    "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'pixi 0.81.0'; exit 0; }\n"
+    "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'pixi 0.83.0'; exit 0; }\n"
     "echo ' WARN some progress first' >&2\n"
     "printf 'Error:   \\303\\227 lock file not up-to-date with the workspace\\n\\n' >&2\nexit 1\n")
 (MULTI / ".pixi" / "bin" / "pixi").chmod(0o755)
 envm = dict(envn, HOME=str(MULTI), CHECKPOINT_HOME=str(TMP / "state-multi"))
 
 
-def no_build_running(home):
-    """SessionStart retries a failed build in the background: wait it out."""
-    return wait_for(lambda: not list(Path(home).glob(".claude/plugins/data/check-checkpoint/envs/*.building")), 20)
+def no_build_running(home, t0):
+    """SessionStart (begun at T0) retries a failed build in the background, maybe not started yet when the
+    hook returns; the retry rewrites install.log under its lock: wait until it has, and the lock is gone."""
+    envs = Path(home) / ".claude" / "plugins" / "data" / "check-checkpoint" / "envs"
+    return wait_for(lambda: any(p.stat().st_mtime >= t0 for p in envs.glob("*/install.log"))
+                    and not list(envs.glob("*.building")), 20)
 
 
 r = run_sh(NOPIXI / "hooks" / "env.sh", ["ensure"], envm)
+_t0 = time.time()
 msg = sys_msg(run_sh(NOPIXI / "hooks" / "fast.sh", ["SessionStart"], envm, base()))
-no_build_running(MULTI)
+no_build_running(MULTI, _t0)
 doc = run_sh(NOPIXI / "hooks" / "env.sh", ["doctor"], envm).stdout
 check("pixi's multi-line error ending in a blank line: SessionStart and doctor give its Error line as the reason",
       r.returncode == 1
@@ -2528,6 +2533,216 @@ check("pixi's multi-line error ending in a blank line: SessionStart and doctor g
 run_sh(NOPIXI / "hooks" / "env.sh", ["ensure"], envm)
 check("...with no Error line: its last line that isn't blank",
       "runtime: setup failed: last words here (log: " in run_sh(NOPIXI / "hooks" / "env.sh", ["doctor"], envm).stdout)
+check("...the doctor on a pixi that gives no version: '?; version unknown', no update advice",
+      f"pixi: {BROKEN}/.pixi/bin/pixi (?; version unknown)\n" in run_sh(NOPIXI / "hooks" / "env.sh", ["doctor"], envb).stdout)
+# A pixi whose --version hangs: the session start (and the doctor) wait CK_PIXI_VERSION_WAIT (5 s) for it,
+# then kill it, as py_to does Python (0.9.1 review: the session start ran it with no time limit).
+HANG = TMP / "hanghome"
+(HANG / ".pixi" / "bin").mkdir(parents=True)
+(HANG / ".pixi" / "bin" / "pixi").write_text(
+    f"#!/bin/sh\nif [ \"$1\" = --version ]; then echo $$ > {shlex.quote(str(HANG / 'pid'))}; exec sleep 30; fi\n"
+    "echo 'Error: no install here' >&2\nexit 1\n")
+(HANG / ".pixi" / "bin" / "pixi").chmod(0o755)
+envh = dict(envn, HOME=str(HANG), CHECKPOINT_HOME=str(TMP / "state-hang"))
+
+
+def hung_pixi_gone():
+    """The hung fake pixi (its pid file) is gone; one left running is stopped here (it is this suite's)."""
+    try:
+        pid = int((HANG / "pid").read_text())
+    except (OSError, ValueError):
+        return False
+    (HANG / "pid").unlink()
+
+    def alive():
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    gone = wait_for(lambda: not alive(), 3)
+    if not gone:
+        os.kill(pid, signal.SIGTERM)
+    return gone
+
+
+_t0 = time.time()
+doc = subprocess.run([SH, str(NOPIXI / "hooks" / "env.sh"), "doctor"], env=envh, capture_output=True, text=True,
+                     timeout=60).stdout
+_took = time.time() - _t0
+check(f"a pixi whose --version hangs ({Path(SH).name}): the doctor stops waiting after CK_PIXI_VERSION_WAIT "
+      f"({_took:.1f} s), says '?; version unknown', and the hung pixi is killed",
+      f"pixi: {HANG}/.pixi/bin/pixi (?; version unknown)\n" in doc and _took < 12 and hung_pixi_gone())
+_t0 = time.time()
+r = subprocess.run([SH, str(NOPIXI / "hooks" / "fast.sh"), "SessionStart"], input=json.dumps(base()), env=envh,
+                   capture_output=True, text=True, timeout=60)
+_took = time.time() - _t0
+check(f"...the session start too ({_took:.1f} s): it answers, with no update advice, and the hung pixi is killed",
+      _took < 12 and "checkpoint:" in sys_msg(r) and "Update pixi" not in sys_msg(r) and hung_pixi_gone())
+
+# The session start says which state the setup is in, to the user and in
+# Claude's context, with what to do (0.9.1: Claude was told "still setting up
+# its runtime" whether setup ran, had failed or had no pixi); a pixi older
+# than CK_PIXI_MIN gets the update advice whatever the build's state (its
+# build can only fail; 0.9.0 showed pixi's error and "retried at every session
+# start"). Under sh and dash.
+
+
+def ss_ctx(r):
+    try:
+        return json.loads(r.stdout or "{}").get("hookSpecificOutput", {}).get("additionalContext", "")
+    except ValueError:
+        return ""
+
+
+def pixi_home(tag, ver, sleep=0):
+    """A HOME whose ~/.pixi/bin/pixi says it is pixi VER ('': no version) and fails every install with pixi's
+    own too-old error, after SLEEP seconds."""
+    h = TMP / f"pixihome-{tag}"
+    (h / ".pixi" / "bin").mkdir(parents=True)
+    say = f"echo 'pixi {ver}'" if ver else ":"
+    (h / ".pixi" / "bin" / "pixi").write_text(
+        f"#!/bin/sh\n[ \"$1\" = --version ] && {{ {say}; exit 0; }}\nsleep {sleep}\n"
+        f"echo \"Error: this project requires pixi '>=0.83.0', but you have pixi {ver}\" >&2\nexit 1\n")
+    (h / ".pixi" / "bin" / "pixi").chmod(0o755)
+    return h
+
+
+def ss_env(home, tag):
+    return dict(envn, HOME=str(home), CHECKPOINT_HOME=str(TMP / f"state-ss-{tag}"),
+                CHECKPOINT_GATEWAY_ENV=os.environ["CHECKPOINT_GATEWAY_ENV"])
+
+
+def older_env(home):
+    """An earlier version's env, built and ready in HOME's plugin data folder (its python this suite's): an
+    update's session runs this version's code on it while this version's env builds."""
+    d = Path(home) / ".claude" / "plugins" / "data" / "check-checkpoint" / "envs" / "0123456789ab"
+    (d / ".pixi" / "envs" / "default" / "bin").mkdir(parents=True)
+    os.symlink(sys.executable, d / ".pixi" / "envs" / "default" / "bin" / "python3")
+    (d / ".ready").write_text("")
+    return d
+
+
+def session_start_in(shell, home, tag, ensure=False, extra=None):
+    """NOPIXI's SessionStart under SHELL with HOME's pixi (after a failed `env.sh ensure` with ensure; EXTRA:
+    more environment): the message and Claude's context, once the retry it started is over."""
+    env = dict(ss_env(home, tag), **(extra or {}))
+    if ensure:
+        subprocess.run([shell, str(NOPIXI / "hooks" / "env.sh"), "ensure"], env=env, capture_output=True, timeout=60)
+    t0 = time.time()
+    r = subprocess.run([shell, str(NOPIXI / "hooks" / "fast.sh"), "SessionStart"], input=json.dumps(base()),
+                       env=env, capture_output=True, text=True, timeout=60)
+    no_build_running(home, t0)
+    return sys_msg(r), ss_ctx(r)
+
+
+UPDATE_MSG = "Update pixi: pixi self-update, or your package manager (Homebrew, MacPorts); then start a new session."
+# Claude's words come from CK_PIXI_UPDATE too (0.9.1 review: they were written out again, "their package manager").
+UPDATE_CTX = ("Tell the user once to update pixi and start a new session; how to update it: pixi self-update, or "
+              "your package manager (Homebrew, MacPorts).")
+check("the update advice is written once, as lib.sh's CK_PIXI_UPDATE: fast.sh and env.sh use it (no copy to drift)",
+      'CK_PIXI_UPDATE="pixi self-update, or your package manager (Homebrew, MacPorts)"'
+      in (ROOT / "hooks" / "lib.sh").read_text()
+      and not [f for f in ("fast.sh", "env.sh") if "Homebrew" in (ROOT / "hooks" / f).read_text()])
+for _sh in dict.fromkeys(["sh", SH] + (["/bin/dash"] if Path("/bin/dash").exists() else [])):
+    _t = Path(_sh).name
+    print(f"the session start names the setup's state, under {_t}:")
+    msg, cx = session_start_in(_sh, pixi_home(f"old-{_t}", "0.82.9"), f"old-{_t}")
+    check(f"{_t}: pixi 0.82.9 before any attempt: the user is told it is older than this version needs and how to "
+          "update it (not that first-time setup is running), and that pausing still works",
+          "can't set up its runtime: pixi 0.82.9 is older than this version of checkpoint needs (0.83.0)" in msg
+          and UPDATE_MSG in msg and "Pausing still works" in msg and "first-time setup" not in msg)
+    check(f"{_t}: ...and Claude's context says the same, with what to tell the user (not 'still setting up')",
+          "can't set up its runtime: pixi 0.82.9 is older than this version of checkpoint needs (0.83.0)" in cx
+          and UPDATE_CTX in cx and "still setting up" not in cx)
+    msg, cx = session_start_in(_sh, pixi_home(f"oldf-{_t}", "0.81.0"), f"oldf-{_t}", ensure=True)
+    check(f"{_t}: pixi 0.81.0 after its setup failed: the same advice, not pixi's error and 'retried at every "
+          "session start' (a retry can't help until pixi is updated)",
+          "pixi 0.81.0 is older than this version of checkpoint needs (0.83.0)" in msg and UPDATE_MSG in msg
+          and "retried" not in msg and UPDATE_CTX in cx and "still setting up" not in cx)
+    msg, cx = session_start_in(_sh, pixi_home(f"cur-{_t}", "0.83.0"), f"cur-{_t}", ensure=True)
+    check(f"{_t}: pixi 0.83.0 (CK_PIXI_MIN) whose setup failed: pixi's error and the retry, no update advice; "
+          "Claude is told setup failed (its error), that it is retried and that /check:doctor shows why",
+          "setting up its runtime failed (Error: this project requires pixi '>=0.83.0', but you have pixi 0.83.0)"
+          in msg and "retried at every session start" in msg and "Update pixi" not in msg
+          and "couldn't set up its runtime (setup failed: Error: this project requires pixi '>=0.83.0'" in cx
+          and "/check:doctor shows why" in cx and "still setting up" not in cx and "update pixi" not in cx)
+    # The hook has just started a retry: if it succeeds, the tools come back this session (0.9.1 review: Claude
+    # was told they "aren't available this session; it is retried at the next session start").
+    check(f"{_t}: ...Claude is told a retry is running now and setup is retried at every session start, not that "
+          "the tools are gone for this session",
+          "a retry is running in the background now, and setup is retried at every session start" in cx
+          and "this session" not in cx and "next session start" not in cx)
+    msg, cx = session_start_in(_sh, pixi_home(f"nover-{_t}", ""), f"nover-{_t}", ensure=True)
+    check(f"{_t}: a pixi that gives no version and failed: its failure, no update advice",
+          "setting up its runtime failed" in msg and "Update pixi" not in msg and "setup failed" in cx)
+    msg, cx = session_start_in(_sh, TMP / f"nopixihome-{_t}", f"none-{_t}")
+    check(f"{_t}: no pixi: Claude is told pixi isn't installed and to tell the user to install it from "
+          "https://pixi.sh (not 'still setting up')",
+          "pixi not found" in msg and "can't set up its runtime: pixi isn't installed" in cx
+          and "Tell the user once to install pixi from https://pixi.sh" in cx and "still setting up" not in cx)
+    check(f"{_t}: ...and the user is told to start a new session afterwards, as Claude is (not 'restart Claude Code')",
+          "Install pixi from https://pixi.sh, then start a new session." in msg and "restart" not in msg)
+    # The retry SessionStart starts empties install.log under its lock and takes 3 s to fail ("attempt 2"); the
+    # hook's `pixi --version` takes 2 s, by when the retry has emptied the log: this pins that the state and the
+    # reason are read before the version check. It doesn't pin that they are read before the retry is started:
+    # the retry takes longer to reach its lock than the hook takes to read them, so that order isn't tested.
+    _h = TMP / f"pixihome-retry-{_t}"
+    (_h / ".pixi" / "bin").mkdir(parents=True)
+    (_h / ".pixi" / "bin" / "pixi").write_text(
+        f"#!/bin/sh\nif [ \"$1\" = --version ]; then sleep 2; echo 'pixi 0.83.0'; exit 0; fi\n"
+        f"n=$(cat {shlex.quote(str(_h / 'attempts'))} 2>/dev/null || echo 0); n=$((n + 1))\n"
+        f"echo $n > {shlex.quote(str(_h / 'attempts'))}\n[ $n -gt 1 ] && sleep 3\n"
+        "echo \"Error: attempt $n failed\" >&2\nexit 1\n")
+    (_h / ".pixi" / "bin" / "pixi").chmod(0o755)
+    msg, cx = session_start_in(_sh, _h, f"retry-{_t}", ensure=True)
+    check(f"{_t}: a failed setup is still said as failed, with the failed attempt's reason, when the retry has "
+          "emptied install.log by the time pixi's version is known (both read before the version check: not "
+          "'(no output)', not 'running')",
+          lambda: "setting up its runtime failed (Error: attempt 1 failed)" in msg
+          and "setup failed: Error: attempt 1 failed" in cx
+          and wait_for(lambda: (_h / "attempts").read_text().strip() == "2", 20))
+    msg, cx = session_start_in(_sh, pixi_home(f"run-{_t}", "0.83.0", sleep=2), f"run-{_t}")
+    check(f"{_t}: setup running: first-time setup in the background, and Claude is told it is still setting up "
+          "in the background, with nothing to tell the user",
+          "first-time setup is running" in msg and "still setting up its runtime in the background" in cx
+          and "Tell the user" not in cx)
+    # An update (0.9.1 review): an earlier version's env is ready and runs this version's code, so the session
+    # start is Python's; this version's env can't be built with a pixi older than its lock needs, and
+    # requires-pixi moves with every relock. 0.9.0 and the first 0.9.1 draft said nothing at the session
+    # start, and the doctor said "building a new env" with no build running.
+    _h = pixi_home(f"upd-{_t}", "0.81.0")
+    _old = older_env(_h)
+    doc = subprocess.run([_sh, str(NOPIXI / "hooks" / "env.sh"), "doctor"], env=ss_env(_h, f"upd-{_t}"),
+                         capture_output=True, text=True, timeout=60).stdout
+    check(f"{_t}: an update not built yet, an earlier env ready: the doctor says this version's env isn't built "
+          "yet and the previous one runs meanwhile (not that it is building)",
+          f"runtime: this version's env isn't built yet; the previous one runs meanwhile ({_old})\n" in doc)
+    msg, cx = session_start_in(_sh, _h, f"upd-{_t}")
+    _upd = ("can't set up this version's runtime: pixi 0.81.0 is older than this version of checkpoint needs "
+            "(0.83.0)")
+    check(f"{_t}: pixi 0.81.0 with an update's env it can't build, an earlier env running: the session start "
+          "tells the user, that the previous runtime runs meanwhile, and how to update pixi",
+          f"checkpoint: {_upd}, so it runs on its previous runtime meanwhile. {UPDATE_MSG}" in msg)
+    check(f"{_t}: ...and Claude, after checkpoint's own session note (Python answered)",
+          "TRACKER.md" in cx and f"checkpoint (plugin) {_upd}; it runs on its previous runtime meanwhile. "
+          f"{UPDATE_CTX}" in cx)
+    doc = subprocess.run([_sh, str(NOPIXI / "hooks" / "env.sh"), "doctor"], env=ss_env(_h, f"upd-{_t}"),
+                         capture_output=True, text=True, timeout=60).stdout
+    check(f"{_t}: ...the doctor: this version's env failed to build (pixi's error), the previous one runs "
+          "meanwhile, and pixi is older than this version needs (not 'building a new env')",
+          "runtime: this version's env failed to build: Error: this project requires pixi '>=0.83.0', but you "
+          "have pixi 0.81.0 (log: " in doc and f"the previous one runs meanwhile ({_old})\n" in doc
+          and "building a new env" not in doc and "(0.81.0; older than this version needs (0.83.0)" in doc)
+    _h = pixi_home(f"updc-{_t}", "0.83.0")
+    older_env(_h)
+    msg, cx = session_start_in(_sh, _h, f"updc-{_t}", ensure=True,
+                               extra={"CHECKPOINT_START_MSG": "stale note", "CHECKPOINT_START_CTX": "stale context"})
+    check(f"{_t}: pixi 0.83.0 whose update build failed, an earlier env running: Python's session start with no "
+          "update advice, and nothing of a CHECKPOINT_START_MSG/_CTX the caller had set (fast.sh alone sets them)",
+          "TRACKER.md" in cx and "pixi" not in msg and "update pixi" not in cx and "stale" not in msg
+          and "stale" not in cx)
 
 # --- the runtime env (brief section 2) ---------------------------------------------------
 print("the runtime env in Claude Code's plugin data folder, built with pixi install --locked:")

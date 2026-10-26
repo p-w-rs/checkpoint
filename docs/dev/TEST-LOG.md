@@ -2,6 +2,26 @@
 
 > Developer documentation: what each verification run found, newest first. Kept out of [CLAUDE.md](../../CLAUDE.md) so that file stays short; the current state is in [TESTING.md](TESTING.md).
 
+## 0.9.1 (unreleased): setup messages, 2026-10-26
+
+Claude Code 2.1.310, pixi 0.83.0 and Python 3.15.1 on macOS arm64, scratch
+configs, the machine at load 3. The tree includes the session start's setup
+states, the doc fixes and the fixes from their review: a too-old pixi said
+during an update too, the doctor's update line, a 5 s limit on `pixi
+--version`, Claude's text for a failed setup.
+
+- Suite: 1151 passed under sh, 1145 under dash. The review's runs of the
+  tree before its fixes: 1134 / 1128.
+- 8 of 8 mutations caught by a named check, on scratch copies cut after the
+  session-start checks: the update path's too-old note never set, Python
+  not adding it, its variables not cleared (a caller's value showed),
+  Claude's old failed-setup text, `pixi --version` with no limit, the
+  doctor's "building a new env" in every update state, "restart Claude
+  Code", Claude's update advice written out again. All eight undone at
+  once: 21 checks fail.
+- Not pinned by a check: that the state is read before the retry starts
+  (the retry takes longer to reach its lock than the hook takes to read).
+
 ## 0.9.0 (unreleased): the latest Claude Code, 2026-10-25
 
 Claude Code 2.1.310, pixi 0.83.0 and Python 3.15.1 on macOS arm64, scratch
