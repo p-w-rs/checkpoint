@@ -17,14 +17,17 @@ ${XDG_STATE_HOME:-~/.local/state}/checkpoint):
     trackers/<sid>        trackers this session wrote (one path per line; fast.sh)
     count/<sid>           tool calls since the tracker was last written
     turn/<sid>, turn-start/<sid>  tool calls this turn, and when it started
-    checkpoints/<sid>.json  checkpoint for sessions with no tracker
+    checkpoints/<sid>.json  the pause-time checkpoint of a session whose task has no
+                          journal yet (else journal/<task>/checkpoint-<sid>.json:
+                          core.checkpoint_path)
     jobs.json, jobs/<id>/   job registry and logs (jobs.py; a gateway job's record names its
                           supervisor and the gateway's job id, and has no folder)
     gateway/<sid>.json    the session's cursor on the gateway's events (gateway.py: epoch,
                           next seq, what it follows); gateway/<sid>.lock: one pause/resume
                           decision at a time
     spool/<sid>/          hook and mod events waiting for Python (capture.py; fast.sh writes it)
-    journal/<task>/       the durable journal of a task (journal.py); removed after
+    journal/<task>/       the durable journal of a task (journal.py), with its sessions'
+                          pause-time checkpoints (checkpoint-<sid>.json); removed after
                           CHECKPOINT_KEEP_DAYS (finished) / CHECKPOINT_KEEP_OPEN_DAYS (open)
     exports/              /check:export bundles (recovery.export; never pruned)
     journal-errors/<sid>  the last journal write failure a session hit (.last: recovered)
@@ -41,11 +44,10 @@ ${XDG_STATE_HOME:-~/.local/state}/checkpoint):
 
 The shell pre-filter (hooks/fast.sh, hooks/watch.sh, hooks/lib.sh) and the
 mod (hooks/mod/) use the same paths, so keep them in sync. Everything here is
-private: folders 0700, files 0600 (run.py and the hooks run under umask 077;
-fix_modes() converts an older state folder once). Nothing is stored in the
-plugin folder: installed copies live in a versioned cache folder that an
-update replaces; the runtime env lives in Claude Code's plugin data folder
-(hooks/lib.sh).
+private: folders 0700, files 0600 (run.py and the hooks run under umask 077).
+Nothing is stored in the plugin folder: installed copies live in a versioned
+cache folder that an update replaces; the runtime env lives in Claude Code's
+plugin data folder (hooks/lib.sh).
 """
 from __future__ import annotations
 
@@ -192,41 +194,14 @@ def user_umask() -> int:
 
 
 def ensure_home() -> Path:
-    """CHECKPOINT_HOME, created private (0700), and made private if an
-    older version left it readable."""
+    """CHECKPOINT_HOME, created private (0700), and made private if it is
+    readable by others (a folder made by someone else)."""
     h = home()
     h.mkdir(parents=True, exist_ok=True, mode=0o700)
     with contextlib.suppress(OSError):
         if os.stat(h).st_mode & 0o077:
             os.chmod(h, 0o700)
     return h
-
-
-def fix_modes() -> int:
-    """Once per state folder: make what versions before 0.3 wrote private
-    (folders 0700, files 0600; the terminal helper 0700). Symlinks are left
-    alone. Returns how many modes changed."""
-    h = ensure_home()
-    mark = h / ".modes-v1"
-    if mark.exists():
-        return 0
-    n = 0
-    for dirpath, dirnames, filenames in os.walk(h):
-        for name, want in [(d, 0o700) for d in dirnames] + [(f, 0o600) for f in filenames]:
-            path = os.path.join(dirpath, name)
-            if dirpath == str(h) and name == "checkpoint":
-                want = 0o700
-            try:
-                st_ = os.lstat(path)
-            except OSError:
-                continue
-            if os.path.islink(path) or (st_.st_mode & 0o777) == want:
-                continue
-            with contextlib.suppress(OSError):
-                os.chmod(path, want)
-                n += 1
-    touch(mark, now_iso())
-    return n
 
 
 def gateway_env_path() -> str:
@@ -463,7 +438,6 @@ def _same_entry(a: dict[str, Any], b: dict[str, Any]) -> bool:
 def _write_queued(sid: str, rec: dict[str, Any], q: list[dict[str, Any]]) -> None:
     """Under lock(): store the list and keep queued/<sid> in step with it."""
     rec["queued_pauses"] = q
-    rec.pop("queued_pause", None)  # the single entry of an unreleased 0.2 build
     write_json(session_path(sid), rec)
     if q:
         touch(p("queued", safe_id(sid)), now_iso())
@@ -646,22 +620,6 @@ def clear_paused(sid: str, pending: bool = False) -> bool:
     update_session(sid, paused=False, resumed_at=now_iso(), resumed_ts=time.time(),
                    deny_count=0, unstopped=[])
     return was
-
-
-def migrate_legacy() -> None:
-    """Version 0.1 kept `pause all` as one global paused-all file, which never
-    cleared itself and paused sessions started later. Turn it into flags for
-    the live sessions it still covered, then drop it."""
-    path = p("paused-all")
-    if not path.exists():
-        return
-    pa = read_json(path, {}) or {}
-    ts = float(pa.get("ts") or 0)
-    for s in live_sessions():
-        if float(s.get("resumed_ts") or 0) < ts and float(s.get("created_ts") or 0) < ts:
-            set_paused(s["session_id"], by=str(pa.get("by") or "pause all"))
-    remove(path)
-    remove(p("now-all"))
 
 
 # -- pruning ------------------------------------------------------------------

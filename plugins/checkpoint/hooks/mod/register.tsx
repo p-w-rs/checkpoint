@@ -1,5 +1,5 @@
-// checkpoint's mod: the native half of the plugin (Claude Code 2.1.287+ in
-// the terminal, 2.1.286+ in the desktop app). Everything that must hold when
+// checkpoint's mod: the native half of the plugin (the latest Claude Code,
+// in the terminal or the desktop app). Everything that must hold when
 // mods are switched off is in the classic hooks (hooks/fast.sh); this adds
 // what only a mod can do:
 //
@@ -555,7 +555,7 @@ async function doctor($: E): Promise<string> {
   const py = await sh($, ['run', 'doctor-py', sid], 15000)
   const lines = [
     'checkpoint doctor',
-    `- Claude Code: ${v?.version ?? '?'}; mods: on (this report is the mod's; mods need 2.1.287 in the terminal, 2.1.286 in the desktop app)`,
+    `- Claude Code: ${v?.version ?? '?'}; mods: on (this report is the mod's)`,
     `- surfaces: ${surfaces.length ? surfaces.join(', ') : 'none'}`,
     '- immediate commands: /check-pause [now|interrupt], /check-resume [checkpoint], /check-cancel [interrupt|detach], /check-stop <job>, /check-save, /check-list (pane), /check-diff, /check-doctor; /check:pause, /check:save, /check:status and /check:doctor are answered at once when they run',
     ...(r.out.trim() ? r.out.trim().split('\n').map(l => `- ${l}`) : ['- runtime report: hooks/env.sh doctor printed nothing']),
@@ -709,8 +709,9 @@ export const register: Register = on => {
         verdicts.delete(e.tool_use_id)
         const answered = typeof (r as { deny?: unknown }).deny === 'string' ? 'deny'
           : (r as { isError?: unknown }).isError === true ? 'error' : 'result'
-        // Claude Code 2.1.301 answers a refused call with an error result in
-        // its own words (a deny rule; the person's No): that it never ran.
+        // Claude Code answers a refused call with an error result in its own
+        // words (a deny rule, the person's No, an ask no one could answer):
+        // that it never ran.
         const text = String((r as { text?: unknown }).text ?? '')
         const rejected = answered === 'error' && REFUSAL_RE.test(text)
         const sid = await $.session.id().catch(() => '')

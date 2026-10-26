@@ -3,10 +3,12 @@ a Unix socket, in a thread of the test process. Stdlib only.
 
 It serves what checkpoint's client calls (docs/CONTRACT-v1.md "Calls"):
 capabilities, snapshot, events (long poll, epochs, reset), jobs (start with
-idempotency keys, status, tail, signal) and pause/resume with per-job
+idempotency keys, status, tail, signal; a start's `env` is kept as the job's
+`env` while it lists the feature job_env) and pause/resume with per-job
 on_pause policies, and writes the discovery file the way the gateway does
-(0600, versions, pid, socket, epoch, features). Jobs are records whose state
-the test moves (`set_job`); nothing runs. Knobs for the failure modes:
+(0600, indent=1, versions, pid, socket, epoch, features). Jobs are records
+whose state the test moves (`set_job`); nothing runs. Knobs for the failure
+modes:
 `hang` (the next N calls of a route answer after the client gave up),
 `refuse` (an error answer: status, code, extra fields such as a policy
 refusal's `rule`), `restart()` (a new epoch: jobs it "lost" are
@@ -14,9 +16,9 @@ gone), `inject()` (raw events: duplicates, out of order, extra fields),
 `stop()` (the daemon gone; the contract file left behind or removed),
 `ignore_term` (only KILL ends a job), `unkillable` (no signal ends it).
 `sigints` counts the SIGINTs each job got from pauses (a retry must never
-send a second); with the feature "pause_id" a pause id it has applied is
-answered with that pause's outcomes and applied nowhere again (the proposed
-CONTRACT-v1 addition); without it the field is ignored, as by gateway 0.8.
+send a second); a pause id it has applied is answered with that pause's
+outcomes and applied nowhere again (CONTRACT-v1 `pause_id`). Its defaults
+are the current gateway's: every feature, accounts listed.
 
 The socket lives in a short folder under /tmp (AF_UNIX paths are limited to
 about 104 bytes, and the suite's temp root may be long); `close()` removes
@@ -54,14 +56,16 @@ class _Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 class FakeGateway:
     def __init__(self, contract_path: Path, *, versions: list[Any] | None = None, contract: str = "gateway.v1",
                  features: list[str] | None = None, epoch: int = 1, machine_id: str = "",
-                 version: str = "0.8.0", hosts: list[dict[str, Any]] | None = None):
+                 version: str = "0.10.0", hosts: list[dict[str, Any]] | None = None):
         self.contract_path = Path(contract_path)
         self.dir = Path(tempfile.mkdtemp(prefix="ckgw-", dir="/tmp"))
         os.chmod(self.dir, 0o700)
         self.sock = self.dir / "gated.sock"
         self.versions = [1] if versions is None else versions
         self.contract = contract
-        self.features = features if features is not None else ["hosts", "events", "pause", "jobs", "terminals"]
+        self.features = features if features is not None else [
+            "hosts", "events", "pause", "jobs", "terminals", "remote", "workspaces", "accounts", "pause_id",
+            "job_env"]
         self.epoch = epoch
         self.machine_id = machine_id or ulid("m")
         self.version = version
@@ -84,9 +88,8 @@ class FakeGateway:
         self.unkillable: set[str] = set()    # jobs no signal ends (the gateway keeps reporting them running)
         self.raw_answer: dict[str, Any] = {}  # route -> an answer sent as is (protocol errors)
         self.sigints: dict[str, int] = {}     # job -> SIGINTs sent by pauses
-        self.pause_ids: dict[str, dict[str, Any]] = {}   # pause id -> its answer (feature "pause_id")
-        self.no_pause_event = False           # apply a pause without its pause.applied event
-        self.accounts: list[dict[str, Any]] | None = None   # snapshot accounts (gateway 0.9); None: not listed
+        self.pause_ids: dict[str, dict[str, Any]] = {}   # pause id -> its answer
+        self.accounts: list[dict[str, Any]] | None = []   # snapshot accounts; None: not listed
         self.server: _Server | None = None
         self.pid = os.getpid()
 
@@ -111,7 +114,7 @@ class FakeGateway:
         tmp = self.contract_path.with_name(".contract.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
-            json.dump(doc, f)
+            json.dump(doc, f, indent=1)     # as the gateway writes it: one value per line
         os.replace(tmp, self.contract_path)
 
     def remove_contract(self) -> None:
@@ -328,6 +331,10 @@ class _Handler(BaseHTTPRequestHandler):
                      "command": cmd, "owner": "agent", "on_pause": body.get("on_pause") or "continue",
                      "session": body.get("session") or "", "task_ref": body.get("task_ref") or "",
                      "workspace": None, "tail": "", "key": key}
+                # the environment the job would run with (feature job_env); a daemon that doesn't
+                # list the feature ignores the field
+                if "job_env" in g.features and isinstance(body.get("env"), dict):
+                    j["env"] = dict(body["env"])
                 g.jobs[jid] = j
                 g.idem[k] = jid
                 g.emit("job.started", job=jid, host=g.machine_id, session=j["session"] or None,
@@ -367,7 +374,7 @@ class _Handler(BaseHTTPRequestHandler):
                 out = []
                 if route == "POST /v1/pause":
                     pid = body.get("pause_id")
-                    if "pause_id" in g.features and isinstance(pid, str) and pid in g.pause_ids:
+                    if isinstance(pid, str) and pid in g.pause_ids:
                         g.emit("pause.applied", session=sid, paused=True, task=body.get("task_ref") or None,
                                replayed=True)
                         return {**g.pause_ids[pid], "replayed": True}
@@ -397,10 +404,9 @@ class _Handler(BaseHTTPRequestHandler):
                                 g.set_job(j["job"], state="exited", signal="INT", exit=None)
                                 o = "interrupted: exited (signal INT)"
                         out.append({"job": j["job"], "policy": pol, "outcome": o})
-                    if not g.no_pause_event:
-                        g.emit("pause.applied", session=sid, paused=True, task=task)
+                    g.emit("pause.applied", session=sid, paused=True, task=task)
                     answer = {"ok": True, "paused": True, "outcomes": out, "dialogs_closed": 0}
-                    if "pause_id" in g.features and isinstance(pid, str) and pid:
+                    if isinstance(pid, str) and pid:
                         g.pause_ids[pid] = answer
                     return answer
                 was = sid in g.paused

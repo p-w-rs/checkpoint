@@ -5,8 +5,8 @@ argument-hint: "[now|interrupt] [all] [--stop-jobs] [<session>]"
 disable-model-invocation: true
 ---
 
-With Claude Code 2.1.287 or newer checkpoint's mod answers `/check:pause` and
-`/check:pause now` itself, at once, and this skill doesn't run. Otherwise
+With mods on, checkpoint's mod answers `/check:pause` and `/check:pause now`
+itself, at once, and this skill doesn't run. Otherwise
 (or for `all`, `<session>`, `--stop-jobs`) the checkpoint hook has already
 handled this command: its result is in the <checkpoint-result> block
 attached to this message. Don't start or continue

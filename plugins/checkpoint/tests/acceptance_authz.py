@@ -4,7 +4,7 @@ Code's permission verdicts reach checkpoint's journal through the mod's
 tool.check observer and the classic PermissionRequest hook, by name and
 decision only, and reconciliation says which still hold.
 
-    pixi exec --spec python=3.12 --spec pyte python tests/acceptance_authz.py [--keep] [--root DIR] [--installed]
+    pixi exec --spec python --spec pyte python tests/acceptance_authz.py [--keep] [--root DIR] [--installed]
 
 A scratch Claude config whose settings allow one command and deny another
 (permission rules), a fake Messages API (tests/tui), default permission mode:

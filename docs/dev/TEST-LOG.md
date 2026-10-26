@@ -2,6 +2,63 @@
 
 > Developer documentation: what each verification run found, newest first. Kept out of [CLAUDE.md](../../CLAUDE.md) so that file stays short; the current state is in [TESTING.md](TESTING.md).
 
+## 0.9.0 (unreleased): the latest Claude Code, 2026-10-25
+
+Claude Code 2.1.310, pixi 0.83.0 and Python 3.15.1 on macOS arm64, scratch
+configs, the machine at load 10-19 from other work. The tree includes the
+overhead checks' Rosetta notes, the long-`sleep` doc check and the fixes
+from their review.
+
+- Suite: 1117 passed under sh, 1111 under dash, 1117 with a 180-character
+  TMPDIR (that run before a missed budget was measured again); `claude
+  plugin test` and `validate` pass inside it. The review's runs of the
+  tree before its fixes: 1112 / 1106.
+- The overhead budgets take the median of the pairs' differences: in a
+  probe at load 12, the medians of two identical copies differed by -2 to
+  39 ms, the median of their pairs' differences by -1 to 2 ms; the spool
+  added 1-8 ms. Before a missed budget was measured again, two dash runs
+  failed only the as-installed budget (16 and 21 ms, then 11 ms); the same
+  set-up probed minutes later added under 1 ms. Hooks run under Rosetta
+  (`arch -x86_64`): identical copies still differed by up to 10.8 ms.
+- 8 of 8 mutations caught by a named check, on scratch copies: sysctl found
+  through PATH, the Rosetta detection inverted, a budget that only prints
+  notes, no second measurement, the difference of the medians, the old
+  inline-only long-`sleep` pattern, a fenced `sleep 60` in a skill, the
+  README's `sleep 60`.
+
+## 0.9.0 (unreleased): latest only, 2026-10-23
+
+The compatibility paths removed (0.1's `paused-all`, the pre-0.3 mode fix,
+checkpoints without `paused_ts` or `session_id`, the hold and `pause.applied`
+look-up for gateways without `pause_id`, Claude Code's removed background
+tools), `checkpoint.json` moved into the state folder, Python unpinned and
+relocked (3.12.15 -> 3.15.1), the doctor's tested pixi range dropped. Claude
+Code 2.1.301 and pixi 0.81.0 on macOS arm64 (the newest, 2.1.309 and 0.83.0,
+weren't installed here). These counts don't hold for the tree as it is now:
+the mod's tests were then rewritten for the latest Claude Code (since 2.1.309
+the test kit's `$.tool.call` checks the call's permission again inside the
+call), and on 2.1.301 `authz.test.ts`'s "after an ask" test fails, so the
+suite's `claude plugin test` check fails there. 0.9.0 hasn't been verified
+on the latest Claude Code yet.
+
+- Suite: 1089 passed under sh, 1083 under dash (baseline 1092 / 1086 on
+  0.8.0: the migration checks went, new ones came).
+- 11 of 11 mutations caught by a named check, on scratch copies: the
+  `paused-all` reader, Python's and sh's `pause_id` requirement, `TaskOutput`
+  read again, the `paused_at` fallback, a tested pixi range, the checkpoint
+  next to the tracker, a checkpoint without `session_id` used, an uncertain
+  pause not resent, the tracker's checkpoint looked for in the project, the
+  early `checkpoints/<session>.json` kept.
+- After the review: a tracker's checkpoint is matched by `tracker_key` (the
+  resolved path's sha256, unscrubbed), forget and purge name tracker folders
+  from the session record, purge calls an earlier version's file one it
+  doesn't know, the fake gateway writes its contract file with `indent=1`,
+  and the README keeps its upgrade privacy note. Suite: 1093 passed under
+  sh, 1087 under dash. 7 of 7 mutations caught: the oldest checkpoint
+  picked, the exact (scrubbed) path compared, no real path in the session
+  record, a folder named once per spelling, the old purge wording, sh
+  without the newline collapse, the README without its privacy note.
+
 ## 0.8.0 (unreleased): four fix rounds, 2026-10-22
 
 A test-machine issue (`ps` hung) meant the runs from round 2 on used a `ps`

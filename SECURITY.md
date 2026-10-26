@@ -22,11 +22,11 @@ expected, where the data ended up, and the versions of checkpoint
 
 ## In scope
 
-- **A secret reaching the journal, an export or your project** in an
-  ordinary form the scrubber should know: a token shape or a common
-  command-line credential that comes through unmasked. This includes
-  `checkpoint.json` in `<project>/.work/`, and anything written there or to
-  the clone's exclude file that git would then publish.
+- **A secret reaching the journal, a pause-time checkpoint or an export** in
+  an ordinary form the scrubber should know: a token shape or a common
+  command-line credential that comes through unmasked.
+- **checkpoint writing into your project** (it never should: trackers are
+  Claude's own files).
 - **Data that should never be recorded** turning up in the state folder:
   file contents, edit strings, the output of a command that isn't a test,
   build or check, a failed command's output.
@@ -41,6 +41,10 @@ expected, where the data ended up, and the versions of checkpoint
   `checkpoint_note`, `task_policy` and the job tools other than `job_start`
   (`job_status`, `job_tail`, `job_stop`).
 - **A job run twice, or run when the gateway refused it.**
+- **A credential variable handed to the gateway** with a job it runs: one of
+  Claude Code's own, a name the scrubber treats as secret (the ssh agent's
+  `SSH_AUTH_SOCK` is sent on purpose), or a git config entry in the
+  environment (`GIT_CONFIG_*`) that holds one.
 
 ## Out of scope
 

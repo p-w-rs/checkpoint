@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Brief 14.4 (responsive pause) and 14.5 (recovery) in the real TUI.
 
-    pixi exec --spec python=3.12 --spec pyte python tests/acceptance_recovery.py [--keep] [--root DIR] [--only a,b,c]
+    pixi exec --spec python --spec pyte python tests/acceptance_recovery.py [--keep] [--root DIR] [--only a,b,c]
         [--installed]
 
 A scratch Claude config and a fake Messages API (tests/tui); the plugin
@@ -230,7 +230,9 @@ def part_a(E: Env) -> None:
               and not any("echo streamed" in json.dumps(r) for r in records(E.home) if r["kind"] == "tool.intent"))
         check("...the status line says paused", wait(s, lambda: "check: paused" in s.text(), 10))
         # 2. A typed message resumes (reconciled); then a long command, queued work, pause.
-        s.api.script([{"tool": "Bash", "input": {"command": "sleep 25; echo long-done > long.txt", "description": "long"}},
+        # (`true; ` first: Claude Code 2.1.310's Bash refuses a foreground command whose
+        # first part is `sleep N` with N >= 25: "Blocked: sleep 25 followed by". Also below.)
+        s.api.script([{"tool": "Bash", "input": {"command": "true; sleep 25; echo long-done > long.txt", "description": "long"}},
                    {"tool": "Bash", "input": {"command": "echo after-long > after.txt", "description": "queued call"}},
                    "done"])
         n0 = len(s.api.main_requests())
@@ -282,8 +284,8 @@ def part_a(E: Env) -> None:
         bg = [r for r in records(E.home) if r["kind"] == "background.result"]
         check("...and the journal links it to its start: background.result, completed, exit 0",
               any(r["data"].get("status") == "completed" and r["data"].get("exit") == 0 for r in bg))
-        # 4. pause now: the running command's process tree is stopped.
-        s.api.script([{"tool": "Bash", "input": {"command": "sleep 40; echo never > never.txt", "description": "doomed"}}, "ok"])
+        # 4. pause now: the running command's process tree is stopped. (`true; `: as in 2.)
+        s.api.script([{"tool": "Bash", "input": {"command": "true; sleep 40; echo never > never.txt", "description": "doomed"}}, "ok"])
         s.submit("next step")
         wait(s, lambda: "resumed this session" in s.all_text(), 20)
         check("resumed again, the next long command runs", wait(s, lambda: running("echo never > never.txt"), 40))

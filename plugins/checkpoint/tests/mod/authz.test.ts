@@ -103,22 +103,40 @@ test('a rule\'s allow is a reference; a plain allow, or a query without a tool_u
   expect(s[0]!.rule).toBe('Bash(git push:*)')
 })
 
+// Claude Code checks the call's permission again inside the call (the
+// kit's $.tool.call does since 2.1.309): after the test's own check (the
+// verdict the observer sees), `w.verdict` is the person's answer to the ask.
+// An ask no one answers comes back as Claude Code's own refusal.
+const YES = { decision: 'allow' } as const
+const NO = { decision: 'deny' } as const
+
 test('after an ask, the gate spools what came of the call (refused, an error, a result)', async ($, on) => {
   const w = world(on)
   await start($)
   w.verdict = { decision: 'ask' }
   await $.tool.check({ tool: 'Bash', input: { command: 'rm -rf build' }, tool_use_id: 'toolu_4' } as never)
+  w.verdict = YES
   w.answer = { deny: 'The user declined' }
   await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_4', command: 'rm -rf build', description: 'x' } as never)
+  w.verdict = { decision: 'ask' }
   await $.tool.check({ tool: 'Bash', input: { command: 'make' }, tool_use_id: 'toolu_5' } as never)
+  w.verdict = YES
   w.answer = { result: 'built' }
   await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_5', command: 'make', description: 'x' } as never)
   w.answer = { result: 'plain' }
   await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_6', command: 'ls', description: 'x' } as never)
-  await settle(w, () => spooled(w, 'mod.tool.answer').length >= 2)
+  w.verdict = { decision: 'ask' }
+  await $.tool.check({ tool: 'Bash', input: { command: 'rm x' }, tool_use_id: 'toolu_12' } as never)
+  w.verdict = NO
+  w.answer = { result: 'never reached' }
+  const r = await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_12', command: 'rm x', description: 'x' } as never)
+  await settle(w, () => spooled(w, 'mod.tool.answer').length >= 3)
   await settle(w, () => false)
   const a = spooled(w, 'mod.tool.answer')
-  expect(a.map(x => [x.tool_use_id, x.answered])).toEqual([['toolu_4', 'deny'], ['toolu_5', 'result']])
+  expect(a.map(x => [x.tool_use_id, x.answered])).toEqual([['toolu_4', 'deny'], ['toolu_5', 'result'], ['toolu_12', 'error']])
+  // the person's No: an error in Claude Code's own refusal words, so it never ran
+  expect((r as { isError?: boolean }).isError).toBe(true)
+  expect(a[2]!.rejected).toBe(true)
 })
 
 test('an error result in Claude Code\'s own refusal words is marked rejected (it never ran); another error is not', async ($, on) => {
@@ -126,14 +144,17 @@ test('an error result in Claude Code\'s own refusal words is marked rejected (it
   await start($)
   w.verdict = { decision: 'ask' }
   await $.tool.check({ tool: 'Bash', input: { command: 'touch x' }, tool_use_id: 'toolu_9' } as never)
+  w.verdict = YES // the answer beneath stands in for Claude Code's own words
   w.answer = { result: 'x', isError: true, text: "The user doesn't want to proceed with this tool use. The tool use was rejected." }
   await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_9', command: 'touch x', description: 'x' } as never)
   w.verdict = { decision: 'deny', rule: 'Bash(touch y)' }
   await $.tool.check({ tool: 'Bash', input: { command: 'touch y' }, tool_use_id: 'toolu_10' } as never)
+  w.verdict = YES
   w.answer = { result: 'x', isError: true, text: 'Permission to use Bash with command touch y has been denied.' }
   await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_10', command: 'touch y', description: 'x' } as never)
   w.verdict = { decision: 'ask' }
   await $.tool.check({ tool: 'Bash', input: { command: 'make' }, tool_use_id: 'toolu_11' } as never)
+  w.verdict = YES
   w.answer = { result: 'x', isError: true, text: 'Exit code 2' }
   await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_11', command: 'make', description: 'x' } as never)
   await settle(w, () => spooled(w, 'mod.tool.answer').length >= 3)

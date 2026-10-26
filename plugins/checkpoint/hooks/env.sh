@@ -93,15 +93,14 @@ doctor)
     echo "plugin: check ${ver:-?} at $(cd "$root" 2>/dev/null && pwd -P)"
     if p=$(ck_find_pixi); then
         pv=$("$p" --version 2>/dev/null | sed -n 's/^pixi[[:space:]]*\([0-9][0-9.]*\).*/\1/p' | head -n 1)
-        verdict=$(awk -v v="${pv:-0}" -v lo="$CK_PIXI_MIN" -v hi="$CK_PIXI_TESTED" '
+        # checkpoint supports the latest pixi; one older than requires-pixi is called out
+        verdict=$(awk -v v="${pv:-0}" -v lo="$CK_PIXI_MIN" '
             function n(s,  a) { split(s, a, "."); return a[1] * 1000000 + a[2] * 1000 + a[3] }
-            BEGIN { if (v == "0") print "version unknown";
-                  else if (n(v) < n(lo)) print "too old: needs " lo " or newer (pixi self-update)";
-                  else if (n(v) > n(hi)) print "newer than tested (" lo " to " hi "); expected to work";
-                  else print "in the tested range " lo " to " hi }')
-        echo "pixi: $p (${pv:-?}; $verdict)"
+            BEGIN { if (v == "0") print "; version unknown";
+                  else if (n(v) < n(lo)) print "; older than this version needs (" lo "): update it with pixi self-update, or your package manager (Homebrew, MacPorts)" }')
+        echo "pixi: $p (${pv:-?}$verdict)"
     else
-        echo "pixi: not found (install it from https://pixi.sh; tested $CK_PIXI_MIN to $CK_PIXI_TESTED)"
+        echo "pixi: not found (install the latest from https://pixi.sh)"
     fi
     case $(ck_state) in
     ready) rs="ready" ;;

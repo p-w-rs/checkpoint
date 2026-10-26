@@ -1336,7 +1336,8 @@ def record(sid: str, r: Recon, why: str) -> str:
 # -- list, diff -----------------------------------------------------------------------
 
 def _cp_line(st_at: summary.TaskState, cpd: dict[str, Any]) -> str:
-    """A one-line summary of a task at a checkpoint (stored as `line` since 0.5.0)."""
+    """A one-line summary of a task at a checkpoint: its stored `line`, or,
+    when that is empty (core.save couldn't build it), one built here."""
     if cpd.get("line"):
         return str(cpd["line"])
     steps = list(st_at.plan.values())
@@ -1564,7 +1565,8 @@ EXPORT_REVIEW = ("Scrubbing is pattern-based: known token shapes and credential 
 
 def _rescrub(obj: Any, depth: int = 0) -> Any:
     """Every string scrubbed again (the journal already is; this is the
-    export's own guarantee, whatever an older version wrote)."""
+    export's own guarantee, whatever rules were in force when it was
+    written)."""
     if depth > 40:
         return "(cut)"
     if isinstance(obj, str):

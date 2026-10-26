@@ -425,8 +425,11 @@ with ux_env(**FENV):
     T_OLD = state.load_session("sess-ux-f-old").get("task_id")
     T_LIVE = state.load_session("sess-ux-f-live").get("task_id")
     T_PAUSED = state.load_session("sess-ux-f-paused").get("task_id")
-    state.update_session("sess-ux-f-old", checkpoint=str(FP / ".work" / "old" / "checkpoint.json"))
-    (FP / ".work" / "old" / "checkpoint.json").write_text("{}")
+    # its pause-time checkpoint (in the state folder, next to the journal) named the project's tracker, and
+    # the session record keeps the tracker's real path (core.write_checkpoint)
+    _f_cp = journal.jdir(T_OLD) / "checkpoint-sess-ux-f-old.json"
+    state.write_json(_f_cp, {"session_id": "sess-ux-f-old", "tracker": str(FP / ".work" / "old" / "TRACKER.md")})
+    state.update_session("sess-ux-f-old", checkpoint=str(_f_cp), tracker=str(FP / ".work" / "old" / "TRACKER.md"))
     from checkpoint import recovery as _ux_recovery
     _ux_recovery.export(T_OLD, "")
     _jdone = jobs.start("ux-done", command="true", cwd=str(FP), session_id="sess-ux-f-old", task_id=T_OLD)
@@ -441,9 +444,10 @@ check("forget --dry-run: says what it would remove (the journal, the finished jo
 r = fcli("forget", T_OLD)
 with ux_env(**FENV):
     _jobs_after = jobs.refresh_all()
-check("forget <task>: its journal, checkpoints, export, finished job (record and log), session record and spool are "
-      "gone; the report names the tracker folder it left alone",
+check("forget <task>: its journal, checkpoints (the pause-time one beside it too), export, finished job (record and "
+      "log), session record and spool are gone; the report names the tracker folder it left alone",
       lambda: r.returncode == 0 and "Forgot task" in r.stdout and not (FH / "journal" / T_OLD).exists()
+      and not _f_cp.exists()
       and not list((FH / "exports").glob(f"*{T_OLD}*")) and _jdone["job"]["id"] not in _jobs_after
       and not (FH / "jobs" / _jdone["job"]["id"]).exists() and not (FH / "sessions" / "sess-ux-f-old.json").exists()
       and not (FH / "spool" / "sess-ux-f-old").exists() and str(FP / ".work" / "old") in r.stdout
@@ -477,10 +481,14 @@ _f_dead2, _ = fsession("sess-ux-f-dead2", "Another old task", alive=False)
 with ux_env(**FENV):
     T_DEAD2 = state.load_session("sess-ux-f-dead2").get("task_id")
     _ux_recovery.export(T_DEAD2, "")
+(FH / ".modes-v1").write_text("")      # a file an earlier version left (no code knows it any more)
 r = fcli("purge", "--dry-run")
 check("purge --dry-run lists what it would remove and keeps everything",
       lambda: r.returncode == 0 and "Purge (dry run)" in r.stdout and T_DEAD2 in r.stdout
       and (FH / "journal" / T_DEAD2).is_dir() and list((FH / "exports").glob("*")))
+check("...an earlier version's leftover is named as a file it doesn't know, never as not checkpoint's",
+      lambda: "files it doesn't know (an earlier version's leftovers, or not checkpoint's), left alone: .modes-v1"
+      in r.stdout and "; not checkpoint's, left alone" not in r.stdout)
 # Names in the per-session folders that are no session (a temp file, a bare suffix): never a whole folder.
 for _stray in (FH / "checkpoints" / ".json", FH / "spool-errors" / ".last", FH / "count" / ".x.123.tmp"):
     _stray.parent.mkdir(parents=True, exist_ok=True)
@@ -502,11 +510,11 @@ check("purge: the dead sessions' journals, records, spools and the exports are g
       and (FH / "flags" / "sess-ux-f-paused").exists() and (FH / "checkpoint").exists()
       and (FH / "spool" / "sess-ux-f-live").is_dir() and (FH / "spool" / "sess-ux-f-paused").is_dir()
       and "rm -rf <project>/.work" in r.stdout and str(FP) in r.stdout and "Kept, still needed" in r.stdout
-      and (FP / ".work" / "old" / "TRACKER.md").exists())
+      and (FP / ".work" / "old" / "TRACKER.md").exists() and (FH / ".modes-v1").exists())
 with ux_env(**FENV):
     _reg_after = jobs.refresh_all()
-check("...a kept (paused) session's finished job stays, with its folder (its checkpoint.json lists it); a dead "
-      "session's goes",
+check("...a kept (paused) session's finished job stays, with its folder (its pause-time checkpoint lists it); a "
+      "dead session's goes",
       lambda: _jkept["job"]["id"] in _reg_after and (FH / "jobs" / _jkept["job"]["id"]).is_dir()
       and _jgone["job"]["id"] not in _reg_after and not (FH / "jobs" / _jgone["job"]["id"]).exists()
       and "1 finished job(s) of those sessions and tasks" in r.stdout)
@@ -566,27 +574,13 @@ _npw = ux_run(UXP / "hooks" / "fast.sh", ["UserPromptSubmit"], ENVN, ux_pay("ses
 check("...and so does the shell's fallback without a runtime",
       lambda: "any non-/check command resumes" in _npw.stdout)
 # --- round 2 of the review -------------------------------------------------------------------
-print("round 2: the exclude line once, `last`, unrecorded commands, forget's shared spool, the trim, forget-job:")
+print("round 2: `last`, unrecorded commands, forget's shared spool, the trim, forget-job:")
 from checkpoint import recovery as _r2_recovery  # noqa: E402
-
-# ensure_excluded: never its line twice (should-fix 6).
-if shutil.which("git"):
-    _genv = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CEILING_DIRECTORIES": str(TMP.resolve())}
-    _xr, _xl = [], []
-    for _n, _pre in (("excl-neg", None), ("excl-nonl", "*.log\n.work/")):
-        _xg = UX / _n
-        (_xg / ".work" / "t").mkdir(parents=True)
-        subprocess.run(["git", "init", "-q"], cwd=_xg, env=dict(os.environ, **_genv))
-        (_xg / ".gitignore").write_text("!.work/\n")     # git check-ignore keeps saying "not ignored"
-        if _pre:
-            (_xg / ".git" / "info" / "exclude").write_text(_pre)
-        with ux_env(**_genv):
-            _xr.append([core.ensure_excluded(_xg / ".work" / "t" / "checkpoint.json") for _ in range(4)])
-        _xl.append((_xg / ".git" / "info" / "exclude").read_text().splitlines())
-    check("ensure_excluded never adds its line twice: with `!.work/` in .gitignore (check-ignore keeps saying no) four "
-          "checkpoint writes leave one `.work/` line, and a line already there (no newline after it) is left alone",
-          lambda: _xl[0].count(".work/") == 1 and bool(_xr[0][0]) and not any(_xr[0][1:])
-          and _xl[1] == ["*.log", ".work/"] and not any(_xr[1]))
+check("the hooks never edit a clone's exclude file (no core.ensure_excluded; only the session note asks Claude to)",
+      lambda: not hasattr(core, "ensure_excluded")
+      and not [p.name for p in (ROOT / "src" / "checkpoint").glob("*.py") if "info/exclude" in p.read_text()
+               and p.name != "hooks.py"]
+      and "info/exclude" in hooks.SESSION_NOTE)
 
 # `/check:resume last` never means the session's own task; an interrupted one first (should-fix 7).
 UXL = UX / "proj-last"

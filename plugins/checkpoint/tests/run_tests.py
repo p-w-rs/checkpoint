@@ -176,6 +176,11 @@ def jread(path):
         return {}
 
 
+def cp_file(sid):
+    """Where the session's pause-time checkpoint was written (its record says)."""
+    return Path(state.load_session(sid).get("checkpoint") or "/nonexistent/checkpoint.json")
+
+
 def job(name):
     return jobs.status(name).get("job") or {}
 
@@ -359,6 +364,13 @@ for _doc, _text in _job_docs.items():
                                    "never approves a job by itself", "pixi-guard refuses Python outside pixi",
                                    "masks", "job_tail", "job_status", "a failed `job_stop`", "warns",
                                    "With checkpoint", "pixi-guard's README")))
+for _doc in ("README.md", "help"):
+    _flat = " ".join(_job_docs[_doc].split())
+    check(f"{_doc}: the gateway as 0.11 has it (no sudo or curl/wget refusal by default: network commands are asked "
+          "about, so a job's are refused unless [network] allows them), and a job it runs gets the session's "
+          "environment minus credential variables",
+          "sudo on this computer is" not in _flat and "curl`/`wget" not in _flat and "curl/wget" not in _flat
+          and "network command" in _flat and "`[network]`" in _flat and "minus credential variables" in _flat)
 check("README links the gateway's 'With checkpoint' section and pixi-guard's README",
       "](https://github.com/p-w-rs/gateway#with-checkpoint)" in _job_docs["README.md"]
       and "](https://github.com/p-w-rs/pixi-guard" in _job_docs["README.md"])
@@ -401,6 +413,38 @@ if _bad:
     print(f"       (broken: {', '.join(_bad)})")
 check("doc links stay in the repo or are URLs (a ../gateway link is broken on GitHub)",
       not _bad and "[gateway](https://github.com/p-w-rs/gateway)" in _job_docs["README.md"])
+_req = _job_docs["README.md"].partition("\n## Requirements\n")[2].partition("\n## ")[0]
+_user_docs = [_job_docs["README.md"], *(p.read_text() for p in sorted((ROOT / "skills").glob("*/SKILL.md")))]
+_upg = " ".join(_job_docs["README.md"].partition("\n**Upgrading.**")[2].partition("\n\n")[0].split())
+check("the README asks for the latest Claude Code and pixi, with no old minimum or rollback recipe (nor do the "
+      "skills name an old Claude Code); its upgrade note keeps the privacy caution about older records",
+      "The latest Claude Code" in _req and "The latest pixi" in _req
+      and not any(re.search(r"\d+\.\d+\.\d+(\+| or newer)", d) for d in _user_docs)
+      and "**Rolling back.**" not in _job_docs["README.md"] and "#v0." not in _job_docs["README.md"]
+      and "before 0.8.0 were scrubbed with fewer rules" in _upg and "weren't scrubbed at all" in _upg
+      and "exports made earlier stay as they were" in _upg)
+# Claude Code refuses a foreground command whose first part is `sleep N` with N >= 25 (2.1.310): a long wait
+# is a job or run_in_background, never a long leading `sleep` in what the docs and skills have Claude run.
+
+
+def long_sleeps(text):
+    """Each `sleep N` (N >= 25) that starts a code span or a line (fenced and indented code too), with any
+    spaces or tabs between: Claude Code takes any blanks there."""
+    return [m[0] for m in re.finditer(r"(?m)(?:^[ \t]*|`)sleep[ \t]+(\d+(?:\.\d*)?)(?![\w.])", text)
+            if float(m[1]) >= 25]
+
+
+_flag = ["run `sleep 60`", "Run:\n\n```sh\nsleep 60\n```\n", "Run:\n\n    sleep 60\n", "run `sleep  60`",
+         "run `sleep\t60`", "run `sleep 25.`", "run `sleep 60; echo done`"]
+_pass = ["run `true; sleep 60`", "run `sleep 1m`", "run `sleep 20`", "run `sleep 24.9`",
+         "a job survives pauses, sleep and the end of the session; 30 s", "a sleep 30 s"]
+check("the long-sleep doc check finds a `sleep 25` or more in a code span, a fenced or an indented block, with "
+      "two blanks or a tab; not `true; sleep 60`, `sleep 1m`, `sleep 20` or the word in prose",
+      [t for t in _flag if not long_sleeps(t)] == [] and [t for t in _pass if long_sleeps(t)] == [])
+_long_sleeps = [s for d in [*_user_docs, read_or_empty(REPO / "docs" / "CONFIGURATION.md")]
+                for s in long_sleeps(d)]
+check("no user doc or skill has Claude run a leading `sleep` of 25 s or more (Claude Code refuses it)",
+      not _long_sleeps)
 
 # --- parsing --------------------------------------------------------------------
 print("command and keyword parsing:")
@@ -501,9 +545,14 @@ check("flag file set", state.p("flags", state.safe_id(SID)).exists())
 out = hook("PreToolUse", bash("rm -rf build"))
 check("Bash denied while paused", denied(out))
 check("deny names the tracker", str(TRK) in reason(out))
-cp = jread(TRK.parent / "checkpoint.json")
-check("checkpoint written next to the tracker on the first deny",
-      cp.get("session_id") == SID and cp.get("stages_in_progress") == ["2. Training"])
+cp = jread(cp_file(SID))
+_task_sid = state.load_session(SID).get("task_id") or "?"
+check("checkpoint written on the first deny in the state folder, next to the task's journal "
+      "(journal/<task>/checkpoint-<session>.json), naming the tracker; nothing written into the project",
+      cp.get("session_id") == SID and cp.get("stages_in_progress") == ["2. Training"]
+      and cp.get("tracker") == str(TRK)
+      and cp_file(SID) == state.p("journal", state.safe_id(_task_sid), f"checkpoint-{state.safe_id(SID)}.json")
+      and sorted(p.name for p in TRK.parent.iterdir()) == ["TRACKER.md"])
 check("checkpoint has the last tool calls", lambda: cp["last_tool_calls"][-1]["tool"] == "Bash")
 check("checkpoint records the pause time as an epoch", lambda: abs(cp["paused_ts"] - time.time()) < 60)
 out = hook("PreToolUse", base(tool_name="Edit", tool_input={"file_path": str(TRK)}))
@@ -538,7 +587,7 @@ print("Stop while paused:")
 old = cp.get("written_at")
 time.sleep(1.1)
 check("Stop lets the paused session stop", hook("Stop", base(stop_hook_active=False)) is None)
-check("Stop refreshes the checkpoint", jread(TRK.parent / "checkpoint.json").get("written_at") not in (None, old))
+check("Stop refreshes the checkpoint", jread(cp_file(SID)).get("written_at") not in (None, old))
 
 print("non-user prompts don't resume:")
 _tn = hook("UserPromptSubmit", base(prompt="<task-notification>\n<task-id>x</task-id>"))
@@ -558,11 +607,11 @@ clear_running()
 
 print("a second pause writes a fresh checkpoint:")
 hook("UserPromptSubmit", base(prompt="/check:pause"))
-before = jread(TRK.parent / "checkpoint.json").get("written_at")
+before = jread(cp_file(SID)).get("written_at")
 time.sleep(1.1)
 hook("PreToolUse", bash("make"))
-check("first deny of the new pause rewrites checkpoint.json",
-      jread(TRK.parent / "checkpoint.json").get("written_at") not in (None, before))
+check("first deny of the new pause rewrites the checkpoint",
+      jread(cp_file(SID)).get("written_at") not in (None, before))
 hook("UserPromptSubmit", base(prompt="back"))
 
 print("pause from the queue (typed while busy):")
@@ -625,9 +674,9 @@ out = hook("PreToolUse", pb(tool_name="Read", tool_input={"file_path": "x"}), en
 out = hook("PreToolUse", pb(tool_name="Write", tool_input={"file_path": str(PROJ2 / "y.py")}), env=EB)
 check("B's deny doesn't send it to A's tracker", denied(out) and str(TRKA) not in reason(out)
       and "<task-slug>/TRACKER.md" in reason(out))
-check("A's checkpoint.json not written by B", not (TRKA.parent / "checkpoint.json").exists())
-check("B's checkpoint goes to the state dir", state.p("checkpoints", SIDB + ".json").exists()
-      and jread(state.p("checkpoints", SIDB + ".json")).get("tracker", 1) is None)
+check("B's checkpoint names no tracker (A's isn't B's), in the state folder",
+      jread(cp_file(SIDB)).get("tracker", 1) is None and jread(cp_file(SIDB)).get("session_id") == SIDB
+      and state.home() in cp_file(SIDB).parents and not (TRKA.parent / "checkpoint.json").exists())
 check("B's task isn't set to A's", state.load_session(SIDB).get("task") != "task-a")
 out = hook("UserPromptSubmit", pb(prompt="back"), env=EB)
 check("B's resume doesn't hand it A's next action", "<checkpoint-resume>" in ctx(out)
@@ -1008,15 +1057,16 @@ check("...of two, the one applied stays remembered and the one that failed is fo
 state.drop_queued(SIDQ)
 resume_everyone()
 
-print("version 0.1's paused-all file is migrated:")
+print("no reader of older versions' state:")
 state.write_json(state.p("paused-all"), {"at": state.now_iso(), "ts": time.time(), "by": "command"})
+n0 = pycalls()
 out = hook("PreToolUse", b2(tool_name="Bash", tool_use_id="tm1",
                               tool_input={"command": "ls"}), env=E2)
-check("a live session it covered is paused (as a flag)", denied(out) and state.is_paused(SID2))
-check("...and the global file is gone", not state.p("paused-all").exists())
-hook("UserPromptSubmit", b2(prompt="back"), env=E2)
-hook("UserPromptSubmit", base(prompt="back"))
-check("...(every live session it covered)", not state.is_paused(SID) and not state.is_paused(SID2))
+check("a leftover global paused-all file (version 0.1's) pauses nothing: the call goes ahead on the fast path, "
+      "no session is paused and the file is left as it is",
+      out is None and pycalls() == n0 and not state.is_paused(SID2) and not state.is_paused(SID)
+      and state.p("paused-all").exists())
+state.remove(state.p("paused-all"))
 
 print("status:")
 out = hook("UserPromptSubmit", base(prompt="/check:status"))
@@ -1050,8 +1100,8 @@ _local = datetime.now().astimezone().utcoffset() or timedelta(0)
 _away = timedelta(hours=((_local.total_seconds() // 3600 + 17) % 24) - 12)   # 5 h east of here
 west = datetime.now(timezone(_away)) - timedelta(minutes=90)
 cp_old = {"paused_at": west.strftime("%Y-%m-%dT%H:%M:%S%z"), "session_id": "nobody"}
-check("older checkpoint (paused_at with another offset): 'Paused for 1 h 30 min.'",
-      "Paused for 1 h 30 min." in core._changes_since(cp_old, ""))
+check("a checkpoint with only paused_at (as before 0.3; no epoch): no pause length is made up from its local time",
+      not any(x.startswith("Paused for") for x in core._changes_since(cp_old, "")))
 
 # --- jobs ----------------------------------------------------------------------------
 print("jobs:")
@@ -2487,7 +2537,7 @@ FAKE = TMP / "fakepixi"
 # A fake pixi: `install --locked --manifest-path M` makes M's env with this
 # suite's Python as its python3. It logs every call.
 echo "$*" >> "$FAKE_PIXI_LOG"
-if [ "$1" = --version ]; then echo "pixi ${{FAKE_PIXI_VERSION:-0.81.0}}"; exit 0; fi
+if [ "$1" = --version ]; then echo "pixi ${{FAKE_PIXI_VERSION:-0.83.0}}"; exit 0; fi
 [ -n "${{FAKE_PIXI_SLEEP:-}}" ] && sleep "$FAKE_PIXI_SLEEP"
 if [ -n "${{FAKE_PIXI_FAIL:-}}" ]; then echo "error: $FAKE_PIXI_FAIL" >&2; exit 1; fi
 case "$1 $2 $3" in "install --locked --manifest-path") ;; *) echo "unexpected: $*" >&2; exit 2 ;; esac
@@ -2990,8 +3040,8 @@ check("...only once", "ran degraded" not in ctx(out))
 print("/check:doctor:")
 DOC = subprocess.run(["sh", str(ROOT / "hooks" / "env.sh"), "doctor", SID_M], capture_output=True, text=True,
                      env=dict(E1, CHECKPOINT_HOME=os.environ["CHECKPOINT_HOME"]))
-check("env.sh doctor: plugin version, pixi and its verdict, runtime, env, python, gate, state, contract, journal",
-      all(s in DOC.stdout for s in (f"plugin: check {__version__}", "pixi: ", "in the tested range 0.68.0 to",
+check("env.sh doctor: plugin version, pixi and its version, runtime, env, python, gate, state, contract, journal",
+      all(s in DOC.stdout for s in (f"plugin: check {__version__}", "pixi: ", "(0.83.0)",
                                     "runtime: ready", f"env: {ENVD1}", "python: ", "gate: normal", "state: ",
                                     "gateway contract: absent", "spool: ")))
 # degraded/<session> stays (until the session is pruned): with the runtime
@@ -2999,10 +3049,13 @@ check("env.sh doctor: plugin version, pixi and its verdict, runtime, env, python
 check("...a degraded mark left from before the runtime was ready is history, not the current gate state",
       "gate: normal (the runtime is ready); this session's gate last ran degraded at 2026-10-19T10:00:00+0000 "
       "PreToolUse: its runtime isn't ready (building)" in DOC.stdout and "gate: degraded" not in DOC.stdout)
-for ver, want in (("0.60.0", "too old: needs 0.68.0"), ("0.99.1", "newer than tested")):
+for ver, want in (("0.82.9", "(0.82.9; older than this version needs (0.83.0): update it with pixi self-update, "
+                             "or your package manager (Homebrew, MacPorts))"),
+                  ("0.99.1", "(0.99.1)\n")):
     d = subprocess.run(["sh", str(ROOT / "hooks" / "env.sh"), "doctor"], capture_output=True, text=True,
                        env=dict(E1, FAKE_PIXI_VERSION=ver))
-    check(f"...pixi {ver}: {want}", want in d.stdout)
+    check(f"...pixi {ver}: {want.strip()} (the latest pixi is the supported one: no tested range, no 'newer "
+          "than tested')", want in d.stdout and "tested" not in d.stdout)
 GWC = Path(os.environ["CHECKPOINT_GATEWAY_CONTRACT"])
 GWC.parent.mkdir(parents=True, exist_ok=True)
 GWC.write_text("{}")
@@ -3056,9 +3109,11 @@ out = hook("UserPromptSubmit", dict(pm, prompt="/check:doctor"), EM)
 check("/check:doctor through the hook: the same report, with Python's own line",
       "checkpoint " + __version__ + " doctor" in ctx(out) and "runtime:" in ctx(out))
 toml = (ROOT / "pixi.toml").read_text()
-check("pixi.toml requires-pixi >=0.68.0 with no upper bound, as lib.sh's tested range starts",
-      re.search(r'^requires-pixi = ">=0\.68\.0"$', toml, re.M) is not None
-      and "CK_PIXI_MIN=0.68.0" in (ROOT / "hooks" / "lib.sh").read_text())
+check("pixi.toml requires-pixi >=0.83.0 with no upper bound (the pixi that made the lock), as lib.sh's CK_PIXI_MIN; "
+      "python unpinned (the newest from conda-forge)",
+      re.search(r'^requires-pixi = ">=0\.83\.0"$', toml, re.M) is not None
+      and "CK_PIXI_MIN=0.83.0" in (ROOT / "hooks" / "lib.sh").read_text()
+      and re.search(r'^python = "\*"$', toml, re.M) is not None)
 shipped = [p for p in ROOT.rglob("*") if p.is_file() and ".pixi" not in p.parts and "tests" not in p.parts
            and "__pycache__" not in p.parts and ".claude-plugin/types" not in str(p)]
 check("--locked builds the shipped env; nothing shipped uses --frozen or `pixi run`",
@@ -3068,11 +3123,8 @@ check("--locked builds the shipped env; nothing shipped uses --frozen or `pixi r
 
 print("checkpoint's state folder is private:")
 SP = TMP / "state-private"
-SP.mkdir(mode=0o755)
-(SP / "sessions").mkdir(mode=0o755)
-(SP / "sessions" / "old.json").write_text("{}")
-(SP / "sessions" / "old.json").chmod(0o644)
-EP = {"CHECKPOINT_HOME": str(SP), "CLAUDE_PID": str(fake_claude().pid)}
+SP.mkdir(mode=0o755)        # made by someone else, readable: made private
+EP ={"CHECKPOINT_HOME": str(SP), "CLAUDE_PID": str(fake_claude().pid)}
 SIDP = "sess-private"
 pp = {"session_id": SIDP, "transcript_path": str(TM), "cwd": str(PROJ)}
 hook("SessionStart", dict(pp, source="startup"), EP)
@@ -3115,8 +3167,6 @@ check("...the job's log 0600, its exit code written into the private file",
       and all((p.parent / "exit_code").read_text().strip() == "0" for p in jlogs))
 check("...while the job itself ran with the user's umask (its file 0644 under umask 022)",
       ((WDP / "made.txt").stat().st_mode & 0o777) == 0o644)
-check("...and an older state folder was made private once (.modes-v1)",
-      (SP / ".modes-v1").exists() and ((SP / "sessions" / "old.json").stat().st_mode & 0o777) == 0o600)
 
 print("the mod (hooks/mod/), checked against the Python side:")
 LOGIC = read_or_empty(ROOT / "hooks" / "mod" / "logic.ts")
@@ -3312,13 +3362,13 @@ else:
         print("  note: " + "\n        ".join(out.strip().splitlines()))
         print("        (`pixi run release-check` before committing)")
 
-# --- checkpoint.json in the user's project -----------------------------------------------
-# It sits next to the tracker, in the user's working tree: nothing unscrubbed
-# goes in, and the work folder is kept out of git by the hook itself, not by
-# the model following the session note. Synthetic secrets, never printed.
-print("checkpoint.json in the project: scrubbed, the work folder in the clone's exclude file:")
+# --- the pause-time checkpoint: in the state folder, never in the user's project -----------
+# It goes into Claude's context at a resume: nothing unscrubbed goes in. The
+# user's repository is never written: no file next to the tracker, no line in
+# the clone's exclude file. Synthetic secrets, never printed.
+print("the pause-time checkpoint: in the state folder, scrubbed; the user's repository untouched:")
 if shutil.which("git") is None:
-    print("  note: git not found; checkpoint.json's exclude not tested")
+    print("  note: git not found; the repository checks not run")
 else:
     import secrets as _sec
     import string as _str
@@ -3329,21 +3379,17 @@ else:
     CPJ_GHP, CPJ_PW, CPJ_TOK, CPJ_JOB, CPJ_INT = ("ghp_" + _canary(36), _canary(16), _canary(24), "ghp_" + _canary(36),
                                                   _canary(16))
     CPJ_ALL = (CPJ_GHP, CPJ_PW, CPJ_TOK, CPJ_JOB, CPJ_INT)
-    # git in the hook never reads the user's config (a global excludes file
-    # could ignore .work/ already).
+    # git in the hook never reads the user's config.
     CPJ_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
                "GIT_CEILING_DIRECTORIES": str(TMP.resolve())}
 
-    def cpj_project(name, sid, tracked=False):
+    def cpj_project(name, sid):
         proj = TMP / name
         (proj / ".work" / "deploy").mkdir(parents=True)
         tgit(proj, "init", "-q")
         (proj / ".work" / "deploy" / "TRACKER.md").write_text(
             f"# Deploy\nSession: {sid}\n\n## Stages\n| # | Stage | Status | N |\n|---|---|---|---|\n"
             "| 1 | Release | in progress | |\n")
-        if tracked:     # this repository commits its trackers
-            tgit(proj, "add", ".work")
-            tgit(proj, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "trackers")
         tp = TMP / f"{name}.jsonl"
         tp.write_text("")
         for i, (tool, inp) in enumerate((("Bash", {"command": f"export GH_TOKEN={CPJ_GHP}"}),
@@ -3366,18 +3412,33 @@ else:
         p = proj / ".git" / "info" / "exclude"
         return p.read_text() if p.exists() else ""
 
+    def tree(proj):
+        """Every file in the project but .git's own (what the hooks could have written)."""
+        return sorted(str(p.relative_to(proj)) for p in proj.rglob("*") if p.is_file() and ".git" not in p.parts)
+
     CPJ_SID = "sess-cpjson-5555-6666"
     CPJ, CPJ_TP = cpj_project("cpjson-proj", CPJ_SID)
+    _excl0, _tree0 = excl(CPJ), tree(CPJ)
     _cpj_job = jobs.start("cpj-deploy", command=f"API_TOKEN={CPJ_JOB} sleep 30", cwd=str(CPJ), session_id=CPJ_SID)
     # What `pause now` records of a command it stopped (core.kill_foreground).
     _out = cpj_pause(CPJ, CPJ_TP, CPJ_SID, lambda: state.add_interrupted(CPJ_SID, [{
         "command": f"curl -u ops:{CPJ_INT} https://deploy.example/run", "tool_use_id": "cpj-k1",
         "at": state.now_iso(), "processes": 1}]))
-    CPJ_FILE = CPJ / ".work" / "deploy" / "checkpoint.json"
+    CPJ_FILE = cp_file(CPJ_SID)
     _txt = CPJ_FILE.read_text() if CPJ_FILE.exists() else ""
     _cp = jread(CPJ_FILE)
-    check("a pause writes checkpoint.json next to the session's tracker in the project",
-          lambda: denied(_out) and _cp.get("session_id") == CPJ_SID)
+    _cpj_task = state.load_session(CPJ_SID).get("task_id") or "?"
+    check("a pause writes the checkpoint in the state folder, next to the task's journal "
+          "(journal/<task>/checkpoint-<session>.json), naming the session's tracker",
+          lambda: denied(_out) and _cp.get("session_id") == CPJ_SID
+          and CPJ_FILE == state.p("journal", state.safe_id(_cpj_task), f"checkpoint-{state.safe_id(CPJ_SID)}.json")
+          and _cp.get("tracker") == str(CPJ / ".work" / "deploy" / "TRACKER.md")
+          and _cp.get("tracker_key") == core.tracker_key(str(CPJ / ".work" / "deploy" / "TRACKER.md"))
+          and state.load_session(CPJ_SID).get("tracker") == str(CPJ / ".work" / "deploy" / "TRACKER.md"))
+    check("...and nothing in the user's repository: no file in the project (the tracker folder holds only the "
+          "tracker), the clone's exclude file as git init left it",
+          lambda: tree(CPJ) == _tree0 == [".work/deploy/TRACKER.md"] and excl(CPJ) == _excl0
+          and ".work" not in excl(CPJ))
     check("...with no secret in it: not the last calls' commands, an MCP call's input, the jobs' commands or the "
           "interrupted ones (raw or JSON-escaped)",
           lambda: _txt and not any(v in _txt or json.dumps(v)[1:-1] in _txt for v in CPJ_ALL))
@@ -3390,34 +3451,73 @@ else:
           and not any("log" in j for j in _cp["jobs"])
           and _cp["interrupted"][0]["command"] == "curl -u ops:*** https://deploy.example/run"
           and _cp["interrupted"][0]["tool_use_id"] == "cpj-k1")
-    check("the hook put the work folder into the clone's exclude file (git rev-parse --git-path info/exclude): "
-          "git ignores the checkpoint, and `git status` doesn't list it",
-          lambda: ".work/" in excl(CPJ).splitlines()
-          and subprocess.run(["git", "-C", str(CPJ), "check-ignore", "-q", str(CPJ_FILE)], env=GIT_ENV).returncode == 0
-          and ".work" not in subprocess.run(["git", "-C", str(CPJ), "status", "--porcelain"], capture_output=True,
-                                            text=True, env=GIT_ENV).stdout)
     time.sleep(1.1)
     hook("Stop", {"session_id": CPJ_SID, "transcript_path": str(CPJ_TP), "cwd": str(CPJ), "stop_hook_active": False},
          CPJ_ENV)
-    check("...once: a refreshed checkpoint (Stop while paused) and another look add no second line",
-          lambda: jread(CPJ_FILE).get("written_at") != _cp.get("written_at")
-          and core.ensure_excluded(CPJ_FILE) == "" and excl(CPJ).splitlines().count(".work/") == 1)
+    check("...refreshed in place (Stop while paused), the repository still untouched",
+          lambda: jread(CPJ_FILE).get("written_at") != _cp.get("written_at") and cp_file(CPJ_SID) == CPJ_FILE
+          and tree(CPJ) == _tree0 and excl(CPJ) == _excl0)
     _resumed = hook("UserPromptSubmit", {"session_id": CPJ_SID, "transcript_path": str(CPJ_TP), "cwd": str(CPJ),
                                          "prompt": "go on"}, CPJ_ENV)
     check("the resume context reads the scrubbed checkpoint (the interrupted command, the last calls)",
           lambda: "curl -u ops:***" in ctx(_resumed) and "mysql -u admin -p***" in ctx(_resumed)
           and not any(v in ctx(_resumed) for v in CPJ_ALL))
+    # The tracker's checkpoint for a session that picks the tracker up by its slug.
+    CPJ_SID2 = "sess-cpjson-9999-0000"
+    state.update_session(CPJ_SID2, cwd=str(CPJ), claude_pid=fake_claude().pid, created_ts=time.time())
+    _picked = core.resume_task(str(CPJ), "deploy", sid=CPJ_SID2)
+    check("/check:resume <tracker> in another session: the tracker's pause-time checkpoint comes along from the "
+          "state folder (its interrupted command, scrubbed)",
+          lambda: "Tracker: " + str(CPJ / ".work" / "deploy" / "TRACKER.md") in _picked
+          and "curl -u ops:***" in _picked and "Checkpoint at pause" in _picked
+          and not any(v in _picked for v in CPJ_ALL))
+    # Two sessions paused on one tracker (it names no session; both wrote it), one of them through a
+    # symlinked path, in a project whose name the scrubber masks.
+    from checkpoint import purge as _cpk_purge
+    CPK_REAL = TMP / "cpk-real" / "password=reset"
+    CPK_TRK = CPK_REAL / ".work" / "ship" / "TRACKER.md"
+    CPK_TRK.parent.mkdir(parents=True)
+    CPK_TRK.write_text("# Ship\nSession: <session id>\n\n## Stages\n| # | Stage | Status | N |\n|---|---|---|---|\n"
+                       "| 1 | Ship | in progress | |\n")
+    (TMP / "cpk-link").symlink_to(TMP / "cpk-real")
+    CPK_OLD, CPK_NEW = "sess-cpkey-old-1111", "sess-cpkey-new-2222"
+    _cpk = {}
+    for _s, _proj in ((CPK_OLD, CPK_REAL), (CPK_NEW, TMP / "cpk-link" / "password=reset")):
+        state.update_session(_s, cwd=str(_proj), created_ts=time.time())
+        state.touch(state.p("trackers", _s), str(_proj / ".work" / "ship" / "TRACKER.md") + "\n")
+        state.set_paused(_s, by="test")
+        _cpk[_s] = core.write_checkpoint(_s)
+    _cpk_t = tracker.by_slug(str(CPK_REAL), "ship")
+
+    def _cpk_age(sid, seconds):
+        os.utime(_cpk[sid], (time.time() - seconds, time.time() - seconds))
+        return (core.tracker_checkpoint(_cpk_t) or {}).get("session_id") if _cpk_t else None
+
+    _cpk_cps = {s: jread(f) for s, f in _cpk.items()}
+    check("/check:resume <tracker>: the newest of two sessions' checkpoints for it, found by the resolved path's "
+          "key (core.tracker_key) though one session wrote it through a symlink and both paths are scrubbed",
+          lambda: _cpk_age(CPK_OLD, 60) == CPK_NEW
+          and all(c.get("tracker_key") == core.tracker_key(str(CPK_TRK)) and c.get("tracker")
+                  and "reset" not in c["tracker"] for c in _cpk_cps.values()))
+    check("...and the other session's once it is the newer", lambda: _cpk_age(CPK_NEW, 120) == CPK_OLD)
+    check("...forget and purge name the tracker folder once, by its real path (the session record's `tracker`)",
+          lambda: _cpk_purge._work_folders([state.load_session(s) for s in _cpk]) == [str(CPK_TRK.parent)])
+    for _s in _cpk:
+        state.clear_paused(_s)
+    _early =state.p("checkpoints", state.safe_id("sess-cpjson-early") + ".json")
+    state.update_session("sess-cpjson-early", cwd=str(CPJ), paused=True)
+    state.touch(state.p("flags", "sess-cpjson-early"), state.now_iso())
+    _p_early = core.write_checkpoint("sess-cpjson-early")
+    state.update_session("sess-cpjson-early", task_id=_cpj_task)
+    _p_later = core.write_checkpoint("sess-cpjson-early")
+    check("a session whose task has no journal yet: checkpoints/<session>.json; once it has one, the checkpoint "
+          "moves next to the journal and the early file goes",
+          lambda: _p_early == _early and _p_later.parent == state.p("journal", state.safe_id(_cpj_task))
+          and not _early.exists() and _p_later.exists())
+    state.clear_paused("sess-cpjson-early")
     if _cpj_job.get("ok"):
         jobs.stop(_cpj_job["job"]["id"], "test")
-    CPT_SID = "sess-cpjson-7777-8888"
-    CPT, CPT_TP = cpj_project("cpjson-tracked", CPT_SID, tracked=True)
-    _before = excl(CPT)
-    cpj_pause(CPT, CPT_TP, CPT_SID)
-    check("a repository that commits its trackers: the checkpoint is written, the exclude file left alone",
-          lambda: (CPT / ".work" / "deploy" / "checkpoint.json").exists() and excl(CPT) == _before
-          and ".work/" not in excl(CPT))
-    for _s in (CPJ_SID, CPT_SID):
-        state.clear_paused(_s)
+    state.clear_paused(CPJ_SID)
 
 # --- the journal (PLAN-v4 phase 2): its own file, sharing this suite's helpers ----------
 print("the journal (tests/journal_tests.py):")

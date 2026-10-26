@@ -49,7 +49,6 @@ def main(argv: list[str]) -> int:
         print(USAGE.strip())
         return 0
     cmd, args = argv[0], argv[1:]
-    state.migrate_legacy()
     if cmd == "status":
         sid = args[1] if args[:1] == ["--session"] and len(args) > 1 else ""
         print(core.status_text(sid))

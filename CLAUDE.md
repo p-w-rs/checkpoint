@@ -45,17 +45,19 @@ plugins/checkpoint/
                                     /check:pause|save|doctor|status answered without a model turn; a
                                     tool.check observer (permission verdicts) and what came of an ask
   skills/{pause,resume,status,save,list,diff,cancel,stop,complete,export,forget,doctor,help}/SKILL.md   /check:*
-  run.py, src/checkpoint/           Python 3.12 stdlib only, run by the env's python; the journal:
+  run.py, src/checkpoint/           stdlib only, run by the env's python (the newest from conda-forge); the journal:
                                     journal.py (format, writer, reader), capture.py (spool -> journal,
                                     tasks, lineage, git versions, background ends), sanitize.py, summary.py;
                                     recovery.py (reconcile, list, diff, select, export, retention, lineage);
                                     purge.py (forget <task>, purge); gateway.py (the CONTRACT-v1 client:
                                     discovery, calls, events -> journal); hosts.py (the gateway hosts a task
                                     used, their state now); authz.py (authorization references); jobs.py (two
-                                    supervisors: the gateway's jobs through the contract, or the own detached
-                                    runner; release() for `forget-job`); cli.py (the terminal helper's
+                                    supervisors: the gateway's jobs through the contract, with the session's
+                                    env minus credential names, or the own detached runner; release() for
+                                    `forget-job`); cli.py (the terminal helper's
                                     commands, and the internal ones the hooks and the mod call)
-  pixi.toml, pixi.lock              the only runtime dependency besides Claude Code
+  pixi.toml, pixi.lock              the only runtime dependency besides Claude Code (python = "*": `pixi update`
+                                    relocks to the newest; requires-pixi is the pixi that made the lock)
   tests/run_tests.py, release_check.py   the suite (it also runs `claude plugin test` and `validate`,
                                     then journal_tests, recovery_tests, gateway_tests, hosts_authz_tests
                                     and, last, ux_tests in its own namespace); is the index the tested tree?
@@ -83,7 +85,7 @@ pixi run status                   # sessions, pause state, jobs (pixi run doctor
 pixi run summary [<task>|last]    # a task's recovery summary from the journal (pixi run tasks: the list)
 pixi run reconcile <task>|last    # what a resume would check first (pixi run list / diff / export / prune)
 pixi run release-check            # before a commit: is the index the tested tree?
-pixi exec --spec python=3.12 --spec pyte python tests/acceptance_journal.py   # one acceptance script (all: TESTING.md)
+pixi exec --spec python --spec pyte python tests/acceptance_journal.py   # one acceptance script (all: TESTING.md)
 ```
 
 Record each verification run in [docs/dev/TEST-LOG.md](docs/dev/TEST-LOG.md)
@@ -99,8 +101,9 @@ plugin>` with the types the plugin-authoring skill ships (the header of
 
 Releasing: bump the version (invariant 10), update CHANGELOG.md, `pixi run
 test`, `git add -A` from the repo root, then `pixi run release-check` before
-`git commit`, and tag the commit `v<version>` (the README's rollback uses
-the tags). Installs get only what is committed, and a finished tree once had
+`git commit`, and tag the commit `v<version>`. Only the latest Claude Code,
+pixi and Python are supported: before a release, `pixi update` and rerun the
+suite. Installs get only what is committed, and a finished tree once had
 `hooks/pixi.sh` and `skills/` untracked and its deletions unstaged:
 `git commit -a` would have shipped a plugin with no `/check:*` commands
 whose jobs server can't start. The check fails on anything untracked,
@@ -133,7 +136,10 @@ must name `CHECKPOINT_GATEWAY_CONTRACT`, `CHECKPOINT_GATEWAY_ENV` and
 acceptance wait after a submit must pump the PTY (the script's `wait()` or
 `wait_main()`, never `FakeAPI.wait_main` or a bare sleep): Claude Code
 writes to its terminal synchronously, so a test that only sleeps blocks it
-in write() for exactly as long as the test waits.
+in write() for exactly as long as the test waits. A scripted Bash call
+never starts with a long `sleep`: Claude Code 2.1.310 refuses a foreground
+command whose first part is `sleep N` with N >= 25 (the scripts run `true;
+sleep 300; ...`).
 Add a check for every behavior change; mutation-check the important ones
 (undo the fix, see the check fail, restore). Mutate a scratch copy of the
 checkout, and run copies one at a time: with suites running side by side,
@@ -184,13 +190,21 @@ needs a new spike.
    text looks like a test or build (`snap`: the git state it runs against)
    and at Stop, PreCompact and PostCompact (ingest); SessionEnd ingests in
    the hook.
-3. Hooks never write the user's or agent's tracker text; only
-   `checkpoint.json` next to it (scrubbed when written: its calls, jobs and
-   interrupted commands, then the whole file once more), and one `.work/`
-   line in the clone's `info/exclude` before a `checkpoint.json` is first
-   written there (`core.ensure_excluded`: never when the repository tracks
-   anything in the work folder, never twice, never raising).
-   `CHECKPOINT_TRACKERS=off` (`state.trackers_on`, Python only) drops the
+3. Hooks never write into the user's projects: not the tracker (Claude's
+   own text), not a file beside it, not the clone's `info/exclude` (the
+   session note asks Claude to add `.work/` there). The pause-time
+   checkpoint goes to the state folder (`core.checkpoint_path`:
+   `journal/<task>/checkpoint-<session>.json`, or `checkpoints/<session>.json`
+   while the task has no journal yet), scrubbed when written (its calls, jobs
+   and interrupted commands, then the whole file once more: a resume puts it
+   into Claude's context). Resuming this session (`core.resume_here`) never
+   uses another session's checkpoint or one without its `session_id`;
+   `/check:resume <tracker>` takes the tracker's newest, whoever wrote it
+   (`core.tracker_checkpoint`), by `tracker_key` (the sha256 of the resolved
+   tracker path, added after the scrub: the `tracker` path may be masked or
+   spelled through a symlink). forget and purge name a tracker folder by the
+   session record's real path (`tracker`). `CHECKPOINT_TRACKERS=off`
+   (`state.trackers_on`, Python only) drops the
    tracker session note, the reminders and the Stop block; the journal
    records the same. A tracker whose `Session:` names another session is
    that session's: never used for this session's checkpoint,
@@ -221,8 +235,8 @@ needs a new spike.
    renaming the plugin, the `jobs` server or a tool breaks them (a test
    pins the names).
 8. No state in the plugin folder (an installed copy is replaced on update,
-   and may be read-only): state lives in `CHECKPOINT_HOME` (the journal
-   and the spool too; private: umask
+   and may be read-only): state lives in `CHECKPOINT_HOME` (the journal,
+   the pause-time checkpoints and the spool too; private: umask
    077 in run.py and every sh hook, folders 0700, files 0600; a job itself
    runs with the user's umask, `CHECKPOINT_USER_UMASK`). The runtime env
    lives in `$CLAUDE_PLUGIN_DATA/envs/<sha12 of pixi.lock>` (fallback
@@ -276,6 +290,17 @@ needs a new spike.
     and runs the job without it (`failed`). Its result goes to
     `jobs/<id>/gateway_env`, then the registry's `gateway_env`. Sourcing
     comes after `job_env()` (checkpoint's pixi activation is already gone).
+    A job the gateway runs gets the contract's `env` only when the gateway
+    lists the feature `job_env`: `jobs.gateway_job_env()`, `job_env()` minus
+    every credential name (`jobs.credential_name`: Claude Code's own
+    credential variables, as the gateway's managed shell and Claude Code's
+    own subprocess list remove them, and whatever `sanitize.sensitive_name`
+    calls sensitive except `jobs.NOT_SECRET_NAMES`: the ssh agent's socket
+    and pid, the askpass programs), with git's config variables as one unit
+    (`_git_config_env`: the `GIT_CONFIG_COUNT`/`KEY_<n>`/`VALUE_<n>` pairs
+    that hold no credential, `jobs.git_config_secret`, numbered again;
+    `GIT_CONFIG_PARAMETERS` whole or not at all: git stops on a count whose
+    pair is missing); checkpoint keeps no copy of it.
 
 14. **The mod never weakens the classic path, and fails closed.** Its
     `tool.call` gate denies while paused (but what the Python gate allows)
@@ -414,20 +439,23 @@ needs a new spike.
     rewrites a flag that is there, `state.set_paused` included, so a second
     pause command during the pause, a queued one's echo, `pause <session>` /
     `pause all` from elsewhere or `/check-pause`, sends nothing for a
-    delivered pause and goes through the retry decision for an uncertain
-    one), the session
-    record says "uncertain" before the call goes out, and an uncertain pause
-    is sent again only to a gateway listing `pause_id`, or when none of the
-    session's live jobs has `on_pause interrupt`; the gateway's
-    `pause.applied` event after the send counts as delivered; otherwise it is
-    held (nothing sent; said once, `/check:doctor`).
+    delivered pause and sends an uncertain one again only with its own id),
+    the session record says "uncertain" before the call goes out, and a pause
+    that didn't or may not have reached the gateway is sent again at the next
+    moment with the same id: the gateway applies a pause id once (CONTRACT-v1
+    `pause_id`). **A gateway without the `pause_id` feature is a contract
+    mismatch** (0.9.0; `gateway.NEEDS_FEATURES`, and `ck_contract` in sh):
+    checkpoint works alone beside it, as for a `versions` list without 1.
+    Nothing reads what only older gateways, Claude Code or checkpoint
+    versions wrote or sent.
 
 18. **Hosts: only what the gateway reported** (0.7.0, `hosts.py`). A host's
     reachable / auth / runtime now come from a fresh snapshot; without one
     every state is "unknown" with the reason, a field the gateway didn't send
     is "not reported", and what the journal last saw is labelled as such,
-    never passed off as now. 0.8's words and 0.9's booleans read the same
-    (`gateway.state_word`). A changed identity (the last `host.state` in the
+    never passed off as now. The gateway's words (`ok`, `down`, `refused`,
+    what its snapshots and events send) and the contract's booleans read the
+    same (`gateway.state_word`). A changed identity (the last `host.state` in the
     journal says changed_key / changed_machine / wrong_host with no later
     event clearing it: `verified`, or `unknown` in the same epoch, the
     gateway's accept path; a restarted gateway's `unknown` clears nothing;
@@ -532,18 +560,25 @@ needs a new spike.
   mod but the test's own hooks: every op (`fs.*`, `process.run`, `env.get`,
   `session.id`, `turn.abort`, `ui.status`, ...) is answered `{ value }` by
   the test, and the test's `$` has events only (no `$.session.id()`; use the
-  mock clock's `settle()` to let unawaited work finish).
+  mock clock's `settle()` to let unawaited work finish). Since 2.1.309 the
+  kit's `$.tool.call` checks the call's permission again inside the call
+  (a test sets the verdict that stands for the person's answer); the mod's
+  tests are written for that and fail on an older Claude Code.
 
 ## Conventions (shared with the sister project)
 
 The user built [gateway](https://github.com/p-w-rs/gateway) (checked out at
 `../gateway`) the same way: hand-rolled stdio MCP server, shell pre-filters
-in front of Python hooks, `pixi run test`, Python 3.12 stdlib only, macOS
-and Linux (POSIX sh that works under dash and with BSD and GNU tools).
+in front of Python hooks, `pixi run test`, stdlib-only Python, macOS and
+Linux (POSIX sh that works under dash and with BSD and GNU tools). Only the
+latest Claude Code and pixi, and the newest Python from conda-forge: no
+backwards compatibility.
 
-Gotcha: if gateway is installed in your session, its PreToolUse hook blocks
-Bash commands whose text contains `curl`, `wget`, etc. (including commit
-messages); use `git commit -F file` if a message mentions them.
+Gotcha: if gateway is installed in your session, its PreToolUse hook asks
+before a Bash command that runs `curl`, `wget` or another network command
+(gateway 0.11's default; `[network]` in its gateway.toml changes it), and a
+checkpoint job running one is refused; if a commit message that mentions
+them is asked about, use `git commit -F file`.
 
 ## User preferences
 

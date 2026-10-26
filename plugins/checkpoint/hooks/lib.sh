@@ -15,8 +15,7 @@
 # replaced on update and may be read-only.
 
 CK_ENV_KEEP_DAYS=7          # an env unused this long is removed (state.ENV_KEEP_DAYS)
-CK_PIXI_MIN=0.68.0          # pixi.toml requires-pixi; oldest pixi that reads pixi.lock (format 7)
-CK_PIXI_TESTED=0.82.0       # newest pixi `pixi install --locked` was tried with (docs/dev/ARCHITECTURE.md)
+CK_PIXI_MIN=0.83.0          # pixi.toml requires-pixi: the pixi that made pixi.lock; an older one refuses the manifest
 
 # The user's home from the password database (as state.gateway_env_path()):
 # Claude Code may run with HOME pointing elsewhere.
@@ -781,6 +780,15 @@ ck_contract() {
     *)
         _h=$(printf '%s' "$_v" | sed 's/,/, /g')
         echo "mismatch: gateway contract mismatch (has ${_h:-none}, needs 1); checkpoint works alone"
+        return 0
+        ;;
+    esac
+    # the features checkpoint needs (gateway.py NEEDS_FEATURES)
+    _fe=$(printf '%s' "$_t" | sed -n 's/.*"features"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' | head -n 1)
+    case $_fe in
+    *'"pause_id"'*) ;;
+    *)
+        echo "mismatch: gateway contract mismatch (its features lack pause_id: update the gateway); checkpoint works alone"
         return 0
         ;;
     esac

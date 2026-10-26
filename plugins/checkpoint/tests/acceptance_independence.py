@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
-"""Brief 4 and 14.2 in the real TUI: checkpoint alone, the gateway alone, both,
-either disabled, an incompatible contract version and upgraded versions, all
-installed the normal way.
+"""Brief 4 and 14.2 in the real TUI: the three plugins alone and together.
 
-    pixi exec --spec python=3.12 --spec pyte python tests/acceptance_independence.py \\
-        --tmp DIR [--keep] [--pixi-cache DIR] [--gateway DIR] [--only ckalone,gwalone,both,ckoff,gwoff,incompat,upgrade]
+checkpoint alone, the gateway alone, both, either disabled, an incompatible
+contract version, upgraded versions, pixi-guard alone, with each and all
+three, all installed the normal way.
+
+    pixi exec --spec python --spec pyte python tests/acceptance_independence.py \\
+        --tmp DIR [--keep] [--pixi-cache DIR] [--gateway DIR] [--pixi-guard DIR] \\
+        [--only ckalone,gwalone,both,ckoff,gwoff,incompat,upgrade,pgalone,pgck,pggw,all3]
 
 Scratch Claude configs, plugins installed from local git-source marketplaces
 (tests/tui install.Hermetic; the gateway through the harness's e2e route,
-checkpoint as check@checkpoint), runtimes built before the sessions, the
-harness's fake Messages API, bypassPermissions. "The model" is scripted: a
-Bash command that says whether it ran in the gateway's managed bash, a
-checkpoint `job_start` (which supervisor took it: checkpoint's registry), a
-gateway `job_start` (the gw tool). checkpoint's view of the gateway is read
+checkpoint as check@checkpoint, pixi-guard as pixi-guard@pixi-guard from
+--pixi-guard, default ../pixi-guard), runtimes built before the sessions
+(pixi-guard has none: sh and awk), the harness's fake Messages API,
+bypassPermissions. "The model" is scripted: a Bash command that says whether
+it ran in the gateway's managed bash, a checkpoint `job_start` (which
+supervisor took it: checkpoint's registry), a gateway `job_start` (the gw
+tool), and for pixi-guard calls whose command writes a marker file and then
+runs a bare `python3` (Bash, checkpoint's `job_start`, the gateway's
+`job_start` and `terminal_send`): refused means pixi-guard's reason in the
+call's result and no marker file. checkpoint's view of the gateway is read
 with its own CLI (`env.sh run gateway`, what /check:status and /check:doctor
 print) under the session's environment.
 
@@ -36,6 +44,19 @@ print) under the session's environment.
   upgrade   the gateway updated again to a compatible newer version and
             checkpoint to a newer version (<installed major.minor>.3000 each):
             checkpoint sees the new gateway and delegates again
+  pgalone   only pixi-guard installed: a bare python3 in Bash is refused with
+            its reason and doesn't run, `pip install` in quotes runs (a near
+            miss), its session note reaches the model; no checkpoint or
+            gateway tool, label, status line, state or managed bash
+  pgck      pixi-guard and checkpoint: checkpoint records and runs a job in
+            its own runner; pixi-guard refuses python3 in Bash and in
+            checkpoint's job_start (no job registered)
+  pggw      pixi-guard and the gateway: Bash runs in the managed bash and a gw
+            job runs; pixi-guard refuses python3 in Bash, in a gw job_start
+            and in terminal_send to a terminal the gateway opened
+  all3      all three: checkpoint sees the gateway (contract v1) and hands its
+            job to it, Bash runs managed; pixi-guard refuses python3 in Bash
+            and in both plugins' job_start
 
 Prints one line per check and a JSON summary to
 --tmp/acceptance-independence.json; exits non-zero on any failure.
@@ -47,6 +68,7 @@ import contextlib
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -62,14 +84,20 @@ REPO = PLUGIN.parents[1]
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(HERE))
 from tui import driver, install, safety  # noqa: E402
+from tui.fakeapi import result_text, tool_results  # noqa: E402
 from acceptance_gateway import (offered_or_deferred, prebuild_checkpoint, prebuild_gateway, records,  # noqa: E402
-                                registry, tools_offered, wait, wait_main)
+                                registry, request_text, tools_offered, wait, wait_main)
 
 RESULTS: list[dict] = []
 NOTES: list[str] = []
 SUMMARY: dict = {}
 CK_JOB = "mcp__plugin_check_jobs__job_start"
 GW_JOB = "mcp__plugin_gate_gw__job_start"
+GW_TERM_OPEN = "mcp__plugin_gate_gw__terminal_open"
+GW_TERM_SEND = "mcp__plugin_gate_gw__terminal_send"
+GW_TERM_CLOSE = "mcp__plugin_gate_gw__terminal_close"
+PG_SAYS = "pixi-guard: refused"       # its deny reason: "pixi-guard: refused, `python3` would run Python outside pixi."
+PG_NOTE = "pixi-guard: on this machine Python runs only through pixi"   # its SessionStart context
 MARKS: list[str] = []
 
 
@@ -117,12 +145,15 @@ def mark(n: int) -> str:
 class Box:
     """One scratch config with the plugins it holds."""
 
-    def __init__(self, root: Path, name: str, env: dict, gateway_src: Path | None, checkpoint: bool):
+    def __init__(self, root: Path, name: str, env: dict, gateway_src: Path | None, checkpoint: bool,
+                 pixi_guard_src: Path | None = None):
         self.root, self.name, self.env = root, name, env
         self.h = install.Hermetic(root / name, extra_env=env)
         self.h.__enter__()
         self.gi = self.h.install_gateway_e2e(gateway_src) if gateway_src else None
         self.p = self.h.install_from(REPO, repo="checkpoint", plugin="check") if checkpoint else None
+        self.pg = (self.h.install_from(pixi_guard_src, repo="pixi-guard", plugin="pixi-guard")
+                   if pixi_guard_src else None)
         self.cfg = self.h.inst.config_dir
         self.home = safety.state_root_for(self.cfg) / ".local" / "state" / "checkpoint"
         self.proj = root / f"{name}-proj"
@@ -137,6 +168,12 @@ class Box:
         if self.p:
             c_ok, d = prebuild_checkpoint(self.root, self.h, self.p, self.env)
             ok &= check(f"[{self.name}] checkpoint's runtime is built before the sessions", c_ok, d)
+        if self.pg:
+            # nothing to build (sh and awk); the installed copy has its hook
+            SUMMARY.setdefault("pixi_guard_version", self.pg.version)
+            ok &= check(f"[{self.name}] pixi-guard is installed (pixi-guard@pixi-guard, its hook in the copy)",
+                        self.pg.cache_path is not None and (Path(self.pg.cache_path) / "hooks" / "guard.sh").is_file(),
+                        json.dumps(self.pg.record)[:300])
         return ok
 
     def session(self, label: str) -> driver.Session:
@@ -263,6 +300,92 @@ def gw_job(s: driver.Session, n: int) -> bool:
     s.submit(f"start gw job {n}")
     wait_main(s, n0 + 2, 120)
     return wait(s, lambda: running(m), 30)
+
+
+def result_of(s: driver.Session, n0: int, tid: str) -> dict | None:
+    """The tool_result block answering the scripted tool_use `tid`, in the main requests since n0."""
+    for rec in s.api.main_requests()[n0:]:
+        for b in tool_results(rec):
+            if b.get("tool_use_id") == tid:
+                return b
+    return None
+
+
+def scripted_call(s: driver.Session, tool: str, inp: dict, tag: str, timeout: float = 120) -> str:
+    """One scripted call of `tool`, then a closing text: the text of the call's result ("" without one)."""
+    tid = "toolu_fakepg" + secrets.token_hex(8)
+    n0 = len(s.api.main_requests())
+    s.api.script([{"tool": tool, "id": tid, "input": inp}, f"done {tag}"])
+    s.submit(tag)
+    wait(s, lambda: result_of(s, n0, tid) is not None, timeout)
+    wait_main(s, n0 + 2, 60)
+    b = result_of(s, n0, tid)
+    return result_text(b) if b else ""
+
+
+def py_cmd(ran: Path) -> str:
+    """A command that writes `ran`, then runs a bare python3 (pixi-guard refuses the whole line)."""
+    return f"printf ran > {shlex.quote(str(ran))}; python3 -V"
+
+
+def pg_refuses(s: driver.Session, tool: str, inp: dict, ran: Path, tag: str) -> tuple[bool, str]:
+    """pixi-guard's guard on one call of `tool` whose command is py_cmd(ran): refused with pixi-guard's
+    reason (in the call's result), and nothing ran (no `ran`: a call let through writes it before python3
+    starts, a Bash call before its result comes back, a job or terminal input a moment later)."""
+    text = scripted_call(s, tool, inp, f"python {tag}")
+    ran_it = wait(s, ran.exists, 3)
+    return (PG_SAYS in text and "`python3`" in text and not ran_it,
+            ("it ran (the marker file is there); " if ran_it else "") + (text[:500] or "(no result)"))
+
+
+def pg_bash(s: driver.Session, box: Box, tag: str) -> tuple[bool, str]:
+    ran = box.proj / f"pg-{tag}.txt"
+    return pg_refuses(s, "Bash", {"command": py_cmd(ran), "description": "python"}, ran, tag)
+
+
+def pg_ck_job(s: driver.Session, box: Box, tag: str) -> tuple[bool, str]:
+    """...through checkpoint's job_start (pixi-guard reads its command as /bin/sh does): no job registered."""
+    ran = box.proj / f"pg-{tag}.txt"
+    before = set(registry(box.home))
+    ok, text = pg_refuses(s, CK_JOB, {"name": f"pg-{tag}", "command": py_cmd(ran), "redo_hint": "rerun"}, ran, tag)
+    new = sorted(set(registry(box.home)) - before)
+    return ok and not new, text + (f"; checkpoint registered {new}" if new else "")
+
+
+def pg_gw_job(s: driver.Session, box: Box, tag: str) -> tuple[bool, str]:
+    """...through the gateway's job_start (pixi-guard reads it as the gateway's bash 5.2 and 5.3 do)."""
+    ran = box.proj / f"pg-{tag}.txt"
+    return pg_refuses(s, GW_JOB, {"command": py_cmd(ran)}, ran, tag)
+
+
+def gw_terminal(s: driver.Session, tag: str) -> dict:
+    """terminal_open (the gateway's): its answer (id t_..., seq), {} without one."""
+    text = scripted_call(s, GW_TERM_OPEN, {"cols": 100, "rows": 24}, f"open a terminal {tag}")
+    i = text.find("{")
+    try:
+        r = json.loads(text[i:]) if i >= 0 else {}
+    except ValueError:
+        r = {}
+    return r if isinstance(r, dict) else {}
+
+
+def pg_term(s: driver.Session, box: Box, term: dict, tag: str) -> tuple[bool, str]:
+    """...typed into a gateway terminal with terminal_send, with Enter (read as typed into its bash)."""
+    ran = box.proj / f"pg-{tag}.txt"
+    return pg_refuses(s, GW_TERM_SEND, {"id": term["id"], "seq": term["seq"], "text": py_cmd(ran), "enter": True},
+                      ran, tag)
+
+
+def pg_noted(s: driver.Session) -> bool:
+    """pixi-guard's SessionStart context reached the model (in a main request)."""
+    return any(PG_NOTE in request_text(r) for r in s.api.main_requests())
+
+
+def pg_hook_failed(s: driver.Session) -> str:
+    """A pixi-guard hook line in the session's debug log saying it failed ("" when there is none)."""
+    dbg = s.debug_path.read_text(errors="replace") if s.debug_path and s.debug_path.exists() else ""
+    m = re.search(r"plugins/cache/pixi-guard/pixi-guard/[^\n]*(exit code [12]|failed)[^\n]*", dbg)
+    return m.group(0)[:300] if m else ""
 
 
 def gated_pids(box: Box) -> list[int]:
@@ -577,13 +700,175 @@ def part_both_and_more(root: Path, env: dict, gsrc: Path, only: set[str]) -> Non
         box.close()
 
 
+def part_pgalone(root: Path, env: dict, pgsrc: Path) -> None:
+    print("pgalone: only pixi-guard installed", flush=True)
+    box = Box(root, "pgalone", env, None, False, pgsrc)
+    try:
+        if not box.build():
+            return
+        s = box.session("alone")
+        try:
+            s.wait_ready(120)
+            ok, text = pg_bash(s, box, "pgalone")
+            SUMMARY["pgalone_refusal"] = text[:300]
+            check("[pgalone] a bare python3 in Bash is refused with pixi-guard's reason, and nothing ran", ok, text)
+            check("[pgalone] its session note reaches the model", pg_noted(s))
+            near = box.proj / "pg-pgalone-quoted.txt"
+            text = scripted_call(s, "Bash", {"command": f"printf '%s' 'pip install requests' > "
+                                                        f"{shlex.quote(str(near))}", "description": "near miss"},
+                                 "near miss pgalone")
+            wait(s, near.exists, 10)
+            check("[pgalone] a near miss runs: `pip install` in quotes is text, not a command",
+                  near.exists() and near.read_text() == "pip install requests", text[:300])
+            m = managed_probe(s, box.proj, "pgalone")
+            check("[pgalone] Bash runs in the user's own shell (no gateway's managed bash)", m.startswith("|"), m)
+            last = s.api.main_requests()[-1] if s.api.main_requests() else {}
+            theirs = [t for t in tools_offered(last) if t.startswith(("mcp__plugin_check_", "mcp__plugin_gate_"))]
+            rt = request_text(last)
+            check("[pgalone] no checkpoint or gateway tool is offered (nor named as deferred)",
+                  last and not theirs and "mcp__plugin_check_" not in rt and "mcp__plugin_gate_" not in rt,
+                  str(theirs))
+            check("[pgalone] no checkpoint footer label or status line, no gateway status line, no checkpoint "
+                  "state anywhere", "check:" not in s.text() and not re.search(r"\bgate:", s.text())
+                  and not box.home.exists())
+            bad = pg_hook_failed(s)
+            check("[pgalone] no pixi-guard hook failed in the debug log", not bad, bad)
+        finally:
+            s.close()
+    finally:
+        box.close()
+
+
+def part_pgck(root: Path, env: dict, pgsrc: Path) -> None:
+    print("pgck: pixi-guard and checkpoint", flush=True)
+    box = Box(root, "pgck", env, None, True, pgsrc)
+    try:
+        if not box.build():
+            return
+        before = known_sessions(box)
+        s = box.session("pgck")
+        try:
+            s.wait_ready(120)
+            check("[pgck] checkpoint records (footer label)", wait(s, lambda: "check: recording" in s.text(), 60))
+            ok, text = pg_bash(s, box, "pgck")
+            SUMMARY["pgck_refusal"] = text[:200]
+            check("[pgck] pixi-guard refuses a bare python3 in Bash (its reason), and nothing ran", ok, text)
+            check("[pgck] pixi-guard's session note reaches the model next to checkpoint's", pg_noted(s))
+            if check("[pgck] checkpoint's job tool is offered", offer(s, CK_JOB)):
+                rec = ck_job(s, box, 11)
+                check("[pgck] a checkpoint job without Python runs in its own runner (pixi-guard lets it through)",
+                      rec is not None and rec.get("owner", "checkpoint") == "checkpoint" and wait(
+                          s, lambda: running(MARKS[-1]), 20), json.dumps(rec)[:300])
+                ok, text = pg_ck_job(s, box, "pgck-job")
+                check("[pgck] pixi-guard refuses checkpoint's job_start running python3 (its reason), no job "
+                      "registered, nothing ran", ok, text)
+            m = managed_probe(s, box.proj, "pgck")
+            check("[pgck] Bash runs (no gateway: the user's own shell)", m.startswith("|"), m)
+            bad = pg_hook_failed(s)
+            check("[pgck] no pixi-guard hook failed in the debug log", not bad, bad)
+        finally:
+            s.close()
+        kill_marks()
+        check("[pgck] checkpoint spooled or journaled the session", new_sessions(box, before),
+              str(known_sessions(box)))
+    finally:
+        box.close()
+
+
+def part_pggw(root: Path, env: dict, gsrc: Path, pgsrc: Path) -> None:
+    print("pggw: pixi-guard and the gateway", flush=True)
+    box = Box(root, "pggw", env, gsrc, False, pgsrc)
+    try:
+        if not box.build():
+            return
+        s = box.session("pggw")
+        try:
+            s.wait_ready(120)
+            contract = box.gi.gateway_home / "run" / "contract.json"
+            check("[pggw] the gateway's daemon is up (contract.json)", wait(s, contract.is_file, 120, 0.5))
+            m = managed_probe(s, box.proj, "pggw")
+            check("[pggw] Bash runs in the gateway's managed bash next to pixi-guard", m.startswith("managed|5."), m)
+            check("[pggw] pixi-guard's session note reaches the model", pg_noted(s))
+            ok, text = pg_bash(s, box, "pggw")
+            SUMMARY["pggw_refusal"] = text[:200]
+            check("[pggw] pixi-guard refuses a bare python3 in Bash (the managed bash would run it): its reason, "
+                  "nothing ran", ok, text)
+            if check("[pggw] the gw job tool is offered", offer(s, GW_JOB)):
+                check("[pggw] a gw job without Python runs (pixi-guard lets it through)", gw_job(s, 12))
+                ok, text = pg_gw_job(s, box, "pggw-job")
+                check("[pggw] pixi-guard refuses a gw job_start running python3 (its reason), the job never ran",
+                      ok, text)
+                term = gw_terminal(s, "pggw")
+                if check("[pggw] the gateway opens a terminal (terminal_open: an id and seq)",
+                         str(term.get("id", "")).startswith("t_") and isinstance(term.get("seq"), int),
+                         json.dumps(term)[:300]):
+                    ok, text = pg_term(s, box, term, "pggw-term")
+                    check("[pggw] pixi-guard refuses python3 typed into it with terminal_send (its reason), nothing "
+                          "ran", ok, text)
+                    # its terminals keep gated from idling out: close it (Box.close stops gated either way)
+                    scripted_call(s, GW_TERM_CLOSE, {"id": term["id"]}, "close the terminal pggw")
+            check("[pggw] no checkpoint footer label or status line, no checkpoint state anywhere",
+                  "check:" not in s.text() and not box.home.exists())
+            bad = pg_hook_failed(s)
+            check("[pggw] no pixi-guard hook failed in the debug log", not bad, bad)
+        finally:
+            s.close()
+        kill_marks()
+    finally:
+        box.close()
+
+
+def part_all3(root: Path, env: dict, gsrc: Path, pgsrc: Path) -> None:
+    print("all3: the gateway, checkpoint and pixi-guard", flush=True)
+    box = Box(root, "all3", env, gsrc, True, pgsrc)
+    try:
+        if not box.build():
+            return
+        s = box.session("all3")
+        try:
+            s.wait_ready(120)
+            contract = box.gi.gateway_home / "run" / "contract.json"
+            check("[all3] the gateway's daemon is up (contract.json)", wait(s, contract.is_file, 120, 0.5))
+            check("[all3] checkpoint records (footer label)", wait(s, lambda: "check: recording" in s.text(), 60))
+            gw = ck_view(s, box, "all3", "gateway")
+            SUMMARY["all3_gateway"] = gw.splitlines()[:1]
+            check("[all3] checkpoint sees the gateway serving this session (available, contract v1, jobs feature)",
+                  "Gateway: available" in gw and "contract v1" in gw and "new jobs run there" in gw, gw[:300])
+            m = managed_probe(s, box.proj, "all3")
+            check("[all3] Bash runs in the managed bash", m.startswith("managed|5."), m)
+            check("[all3] pixi-guard's session note reaches the model", pg_noted(s))
+            ok, text = pg_bash(s, box, "all3")
+            SUMMARY["all3_refusal"] = text[:200]
+            check("[all3] pixi-guard refuses a bare python3 in Bash (its reason), and nothing ran", ok, text)
+            if check("[all3] checkpoint's job tool is offered", offer(s, CK_JOB)):
+                rec = ck_job(s, box, 13)
+                check("[all3] checkpoint's job_start is handed to the gateway (owner gateway, a j_ id)",
+                      rec is not None and rec.get("owner") == "gateway"
+                      and str(rec.get("gateway_job", "")).startswith("j_"), json.dumps(rec)[:300])
+                ok, text = pg_ck_job(s, box, "all3-ckjob")
+                check("[all3] pixi-guard refuses checkpoint's job_start running python3 (its reason), no job "
+                      "registered, nothing ran", ok, text)
+            if check("[all3] the gw job tool is offered", offer(s, GW_JOB)):
+                ok, text = pg_gw_job(s, box, "all3-gwjob")
+                check("[all3] pixi-guard refuses a gw job_start running python3 (its reason), the job never ran",
+                      ok, text)
+            bad = pg_hook_failed(s)
+            check("[all3] no pixi-guard hook failed in the debug log", not bad, bad)
+        finally:
+            s.close()
+        kill_marks()
+    finally:
+        box.close()
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--tmp", default=tempfile.gettempdir())
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--pixi-cache", default=None)
     ap.add_argument("--gateway", default=str(REPO.parent / "gateway"))
-    ap.add_argument("--only", default="ckalone,gwalone,both,ckoff,gwoff,incompat,upgrade")
+    ap.add_argument("--pixi-guard", default=str(REPO.parent / "pixi-guard"))
+    ap.add_argument("--only", default="ckalone,gwalone,both,ckoff,gwoff,incompat,upgrade,pgalone,pgck,pggw,all3")
     a = ap.parse_args(argv)
     before = safety.real_settings_fingerprint()
     root = Path(tempfile.mkdtemp(prefix="ck-ind-", dir=a.tmp))
@@ -592,6 +877,7 @@ def main(argv: list[str]) -> int:
     env = {"PIXI_CACHE_DIR": a.pixi_cache or str(root / "pixi-cache")}
     only = set(a.only.split(","))
     gsrc = Path(a.gateway).resolve()
+    pgsrc = Path(a.pixi_guard).resolve()
     t0 = time.time()
     try:
         if "ckalone" in only:
@@ -600,6 +886,14 @@ def main(argv: list[str]) -> int:
             part_gwalone(root, env, gsrc)
         if only & {"both", "ckoff", "gwoff", "incompat", "upgrade"}:
             part_both_and_more(root, env, gsrc, only)
+        if "pgalone" in only:
+            part_pgalone(root, env, pgsrc)
+        if "pgck" in only:
+            part_pgck(root, env, pgsrc)
+        if "pggw" in only:
+            part_pggw(root, env, gsrc, pgsrc)
+        if "all3" in only:
+            part_all3(root, env, gsrc, pgsrc)
     except Exception as e:  # noqa: BLE001
         import traceback
         traceback.print_exc()

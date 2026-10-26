@@ -2,7 +2,7 @@
 """Brief 14.3 (automatic tracking) in the real TUI: checkpoint's journal
 survives a SIGKILL mid-task, with no Stop and no handoff.
 
-    pixi exec --spec python=3.12 --spec pyte python tests/acceptance_journal.py [--keep] [--root DIR] [--installed]
+    pixi exec --spec python --spec pyte python tests/acceptance_journal.py [--keep] [--root DIR] [--installed]
 
 A scratch Claude config and a fake Messages API (tests/tui): a scripted
 session gets a goal, records a constraint (checkpoint_note), creates and
@@ -169,8 +169,12 @@ def main() -> int:
             # The main loop and the subagent (it runs in the background) each
             # take one of these, in whichever order their requests come. (No
             # test-like words in them: those start a snapshot, which ingests.)
-            {"tool": "Bash", "input": {"command": "sleep 300; echo deploy-wait-a", "description": "long a"}},
-            {"tool": "Bash", "input": {"command": "sleep 301; echo deploy-wait-b", "description": "long b"}},
+            # Not a leading `sleep`: Claude Code 2.1.310's Bash refuses a
+            # foreground command whose first part is `sleep N` with N >= 25
+            # ("Blocked: sleep 300 followed by: ...; use Monitor"), so `true; `
+            # comes first (the summary check below matches from `sleep` on).
+            {"tool": "Bash", "input": {"command": "true; sleep 300; echo deploy-wait-a", "description": "long a"}},
+            {"tool": "Bash", "input": {"command": "true; sleep 301; echo deploy-wait-b", "description": "long b"}},
         ] + ["ok"] * 6
         print("session 1: the scripted task, then SIGKILL", flush=True)
         s1 = Session(root / "s1", proj, plugin_dirs=pdirs, replies=replies, config_dir=cfg,

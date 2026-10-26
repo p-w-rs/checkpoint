@@ -10,8 +10,9 @@ queued) never get here: fast.sh doesn't start Python for them.
 Discovery (docs/CONTRACT-v1.md "Discovery"): `~/.config/gateway/run/
 contract.json` of the password database's home (as the gateway finds it;
 CHECKPOINT_GATEWAY_CONTRACT overrides it in tests, and set but empty turns
-the integration off). A missing file, a dead `pid`, an unknown `contract`, or
-a `versions` list without 1 is "not available", with the reason;
+the integration off). A missing file, a dead `pid`, an unknown `contract`, a
+`versions` list without 1, or `features` without one checkpoint needs
+(NEEDS_FEATURES) is "not available", with the reason;
 `hooks/env.sh doctor` makes the same checks in sh (tests compare the two).
 The file must be a regular file of this user that nobody else can write, and
 its socket a socket of this user: commands and session ids go there.
@@ -61,12 +62,12 @@ SAFE = re.compile(r"[A-Za-z0-9_.:@/+-]{0,120}")     # the gateway's own events.S
 LIVE_STATES = ("starting", "running", "waiting_input", "waiting_auth", "suspended", "disconnected")
 FINAL_STATES = ("exited", "failed", "canceled")
 ON_PAUSE = ("continue", "interrupt", "suspend", "detach")
-# A gateway that lists this feature takes `pause_id` on /v1/pause and answers
-# a pause id it has applied with that pause's outcomes, never signalling
-# again (proposed for CONTRACT-v1; checkpoint sends the id either way, and
-# an older gateway ignores the field: core.gateway_pause then decides a
-# retry from the gateway's own evidence).
-PAUSE_ID_FEATURE = "pause_id"
+# Features checkpoint needs; a daemon that doesn't list one is a contract
+# mismatch (checkpoint works alone). `pause_id`: the gateway takes the
+# pause's id on /v1/pause and answers a pause id it has applied with that
+# pause's outcomes, never signalling again, so an uncertain pause is simply
+# sent again with the same id (core.gateway_pause).
+NEEDS_FEATURES = ("pause_id",)
 PAUSE_ID_RE = re.compile(r"ckp-[0-9a-f]{24}")
 FOLLOW_MAX = 200           # jobs / terminals / requests a cursor remembers
 # Event kinds and the fields a journal record keeps (the contract's v1 list;
@@ -78,8 +79,8 @@ EVENT_FIELDS: dict[str, tuple[str, ...]] = {
     "auth.waiting": ("request", "session", "dialog", "terminal"),
     "auth.supplied": ("request", "outcome"),
     "pause.applied": ("session", "paused", "task", "replayed"),
-    # gateway 0.9: the rights of an entry changed (widened after the person's
-    # OK, narrowed, removed), and an account's state (connected, expired ...)
+    # the rights of an entry changed (widened after the person's OK,
+    # narrowed, removed), and an account's state (connected, expired ...)
     "rights.changed": ("entry", "change"),
     "account.state": ("account", "state"),
     "job.started": ("job", "host", "session", "task", "agent"),
@@ -204,6 +205,11 @@ def discover() -> Gateway:
         has = ", ".join(sanitize.clip(sanitize.scrub(str(v)), 10) for v in vs[:8]) or "none"
         return Gateway("mismatch", f"gateway contract mismatch (has {has}, needs {NEEDS}); checkpoint works alone",
                        path, doc)
+    feats = doc.get("features") if isinstance(doc.get("features"), list) else []
+    missing = [f for f in NEEDS_FEATURES if f not in feats]
+    if missing:
+        return Gateway("mismatch", f"gateway contract mismatch (its features lack {', '.join(missing)}: update the "
+                                   "gateway); checkpoint works alone", path, doc)
     sock = str(doc.get("socket") or "")
     try:
         sst = os.stat(sock) if os.path.isabs(sock) else None
@@ -223,7 +229,7 @@ class CallError(Exception):
     """kind: unreachable (never connected: nothing was done), refused (an
     error answer: nothing was done), ambiguous (sent, then no whole answer:
     it may have been done), protocol (an answer that isn't CONTRACT-v1).
-    `rule`: a policy refusal's rule as the gateway names it (gateway 0.9)."""
+    `rule`: a policy refusal's rule as the gateway names it."""
 
     def __init__(self, kind: str, message: str, status: int = 0, code: str = "", rule: str = ""):
         super().__init__(message)
@@ -397,36 +403,6 @@ def resume(g: Gateway, session: str, task_ref: str = "", pause_id: str = "") -> 
     return call(g, "POST", "/v1/resume", body, timeout=call_timeout() * 2.5)
 
 
-def pause_applied(g: Gateway, session: str, task_ref: str, since: int, epoch: int | None, after_ts: float,
-                  pause_id: str = "") -> dict[str, Any] | None:
-    """The gateway's own evidence that a pause whose answer was lost was
-    applied: its `pause.applied` event (paused, this session, this task or
-    none) after `since` in the same epoch and not older than the send (and,
-    when the event carries a pause id, this one). None when there is none
-    (which proves nothing: the call may still be running there, or the
-    ring may have dropped it); CallError when the events can't be read."""
-    if epoch is None or g.epoch != epoch:
-        return None
-    ev = events(g, since, 0.0, epoch)
-    if ev.get("epoch") != epoch or ev.get("reset"):
-        return None
-    for e in ev.get("events") or []:
-        if not isinstance(e, dict) or e.get("kind") != "pause.applied" or e.get("session") != session:
-            continue
-        if e.get("paused") is not True or (e.get("task") not in (None, "") and e.get("task") != task_ref):
-            continue
-        if not isinstance(e.get("seq"), int) or e["seq"] <= since:
-            continue
-        ts = e.get("ts")
-        if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts < after_ts - 2.0:
-            continue
-        pid = e.get("pause_id")
-        if pid not in (None, "") and pid != pause_id:
-            continue
-        return {"seq": e["seq"], "epoch": epoch}
-    return None
-
-
 # -- what crosses into checkpoint's records ------------------------------------------------
 
 def _safe(v: Any) -> Any:
@@ -499,10 +475,10 @@ def clean_host(h: Any) -> dict[str, Any] | None:
         return None
     out: dict[str, Any] = {"host": hid if isinstance(hid, str) else "", "name": name,
                            "local": h.get("local") is True}
-    # identity and the states the gateway reports (its phase 6): enums and a
-    # machine token; a field it didn't send stays absent. reachable and auth
-    # are words in gateway 0.8 (ok, down, refused, locked, unknown) and
-    # true / false / null in 0.9: one vocabulary here (state_word).
+    # identity and the states the gateway reports: enums and a machine token;
+    # a field it didn't send stays absent. reachable and auth come as the
+    # gateway's words (ok, down, refused, locked, unknown) or as CONTRACT-v1's
+    # true / false / null: one vocabulary here (state_word).
     for k in ("identity", "reachable", "auth", "runtime", "machine", "runtime_version", "platform", "waiting"):
         if k in ("reachable", "auth") and (h.get(k) is None or isinstance(h.get(k), bool)) and k in h:
             out[k] = state_word(k, h[k])
@@ -514,8 +490,8 @@ def clean_host(h: Any) -> dict[str, Any] | None:
         if isinstance(h.get(k), bool):
             out[k] = h[k]
     if isinstance(h.get("rights"), dict):
-        # gateway 0.9: the effective decision per action (read, exec, write,
-        # elevation, credential, network, forwarding, env_import, provision)
+        # the effective decision per action (read, exec, write, elevation,
+        # credential, network, forwarding, env_import, provision)
         out["rights"] = _rights(h["rights"])
     if isinstance(h.get("address"), str):
         out["address"] = sanitize.clip(sanitize.scrub(h["address"]), 120)
@@ -523,8 +499,9 @@ def clean_host(h: Any) -> dict[str, Any] | None:
 
 
 def state_word(kind: str, v: Any) -> str:
-    """A host's reachable / auth as one word: gateway 0.9's true / false /
-    null (unknown), or 0.8's own word as it came."""
+    """A host's reachable / auth as one word: the contract's true / false /
+    null (unknown), or the gateway's own word as it came (its snapshots and
+    host.state events send words)."""
     if v is True:
         return "ok"
     if v is False:
@@ -535,7 +512,7 @@ def state_word(kind: str, v: Any) -> str:
 
 
 def _rights(r: Any) -> dict[str, Any]:
-    """An entry's rights (gateway 0.9: action -> allow / ask / deny): names and
+    """An entry's rights (action -> allow / ask / deny): names and
     enums only."""
     out = {}
     if isinstance(r, dict):
@@ -547,7 +524,7 @@ def _rights(r: Any) -> dict[str, Any]:
 
 
 def clean_account(a: Any) -> dict[str, Any] | None:
-    """An account of the snapshot (gateway 0.9): its name, kind, state and
+    """An account of the snapshot: its name, kind, state and
     rights; never a credential."""
     if not isinstance(a, dict):
         return None

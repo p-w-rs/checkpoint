@@ -3,7 +3,7 @@
 duplicate events, a full disk, hook failures and timeouts, a plugin upgrade
 under live work, and the startup and recording overhead.
 
-    pixi exec --spec python=3.12 --spec pyte python tests/acceptance_durability.py \\
+    pixi exec --spec python --spec pyte python tests/acceptance_durability.py \\
         --tmp DIR [--keep] [--pixi-cache DIR] [--gateway DIR] \\
         [--only concurrent,duplicate,diskfull,timeout,upgrade,overhead]
 
@@ -254,13 +254,28 @@ def part_diskfull(root: Path, env: dict) -> None:
             subprocess.run(["dd", "if=/dev/zero", f"of={filler}", "bs=64k"], capture_output=True)
             free = shutil.disk_usage(mnt).free
             SUMMARY["diskfull_free_after_fill"] = free
+            # The failure shows while it lasts: once the session's reserve lets a write through, recording
+            # works again and the status line is cleared (the failure stays on record: .last, checked below).
+            # On Claude Code 2.1.310 that is ~2 s after it shows, before this turn ends, so look for it at
+            # every poll from the fill on, not only after the turn.
+            shown_at: list[float] = []
+
+            def failure_shown() -> bool:
+                t = s.all_text()
+                if "recording FAILED" in t or "couldn't record" in t:
+                    shown_at.append(time.time())
+                return bool(shown_at)
+
+            def full_done() -> bool:
+                failure_shown()
+                return "full done" in s.all_text()
             s.api.script([bash(f"echo full{i} > full{i}.txt") for i in range(3)] + ["full done"])
             s.submit("while the disk is full")
-            ran = wait(s, lambda: "full done" in s.all_text(), 90)
+            ran = wait(s, full_done, 90)
             check("diskfull: with the disk full the session goes on (not paused: the calls run)", ran and all(
                 (proj / f"full{i}.txt").exists() for i in range(3)))
             s.pump(3)
-            shown = wait(s, lambda: "recording FAILED" in s.all_text() or "couldn't record" in s.all_text(), 30)
+            shown = failure_shown() or wait(s, failure_shown, 30)
             SUMMARY["diskfull_status"] = [ln for ln in s.lines() if "check:" in ln][:3]
             check("diskfull: the recording failure is shown (status line or the hook's message)", shown, s.text()[-500:])
             filler.unlink()

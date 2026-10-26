@@ -48,11 +48,11 @@ from . import sanitize
 DECISIONS = ("allow", "ask", "deny")
 RIGHT_RE = re.compile(r"[a-z][a-z0-9_-]{0,30}(?: \(root\))? on (?:[A-Za-z0-9][A-Za-z0-9_.-]{0,62}|this machine)")
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}")
-# The gateway's rights words (0.8: a host's ssh / sudo, an account's use) and
-# its policy actions (0.9, the snapshot's `rights`): a right compares with the
-# snapshot under its action.
+# The gateway's rights words (its approval hook's: a host's ssh / sudo, an
+# account's use) and its policy actions (the snapshot's `rights`): a right
+# compares with the snapshot under its action.
 VERB_ACTION = {"ssh": "exec", "sudo": "elevation", "scp": "write", "sftp": "write", "rsync": "write", "use": "credential"}
-# gateway 0.9's policy refusal names the action by what it covers (policy.WHAT)
+# the gateway's policy refusal names the action by what it covers (policy.WHAT)
 _WHAT_ACTION = (("running commands", "exec"), ("reading files", "read"), ("writing outside", "write"),
                 ("network paths", "network"), ("sudo (root)", "elevation"), ("the gateway handing a stored credential",
                                                                             "credential"),
@@ -62,10 +62,14 @@ _WHAT_ACTION = (("running commands", "exec"), ("reading files", "read"), ("writi
 HOOK_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,40}")
 MODES = ("default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions")
 # The gateway approval hook's fixed wording (gateway hooks_bash.py and
-# consent.py): its rights are the only names taken from a reason text.
+# consent.py): its rights are the only names taken from a reason text. A
+# right a per-mode table turns off names the mode, by Claude Code's name for
+# it (gateway 0.11, modes.DISPLAY): "ssh is off for box in Auto mode (gateway.toml)".
+_GW_MODE = r"(?: in (?:Manual|Plan|Accept edits|Auto|Bypass permissions|Don't ask) mode)?"
 _GW_ASK = re.compile(r'^gateway: (.+?) (?:is|are) set to "ask"')
-_GW_OFF = re.compile(r"^gateway: ([a-z][a-z0-9_-]{0,30}) is off for ([A-Za-z0-9][A-Za-z0-9_.-]{0,62}) \(gateway\.toml\)")
-_GW_SUDO_OFF = re.compile(r"^gateway: sudo is off on this machine")
+_GW_OFF = re.compile(r"^gateway: ([a-z][a-z0-9_-]{0,30}) is off for ([A-Za-z0-9][A-Za-z0-9_.-]{0,62})"
+                     + _GW_MODE + r" \(gateway\.toml\)")
+_GW_SUDO_OFF = re.compile(r"^gateway: sudo is off on this machine" + _GW_MODE + r" \(gateway\.toml\)")
 _GW_JOB = re.compile(r'^gateway: a job can\'t use the "ask" rights? for (.+?) \(nobody can be asked')
 _GW_POLICY = re.compile(r'^gateway: (.+?) on ([A-Za-z0-9][A-Za-z0-9_.-]{0,62}|this machine) is '
                         r'(?:"ask" \((.*?)\); only|denied by (.+?)(?:;|\.$))')
@@ -98,7 +102,7 @@ def gateway_rights(reason: Any) -> tuple[str, list[str]]:
         return "job", _phrases(m.group(1))
     m = _GW_POLICY.match(r)
     if m:
-        # gateway 0.9: "<what the action covers> on <target> is denied by
+        # the policy wording: "<what the action covers> on <target> is denied by
         # <rule>" / "is \"ask\" (<rule>)": the action from the rule's key, else
         # from what it covers; never the rule's text
         what, target, rule = m.group(1).lower(), m.group(2), m.group(3) or m.group(4) or ""
@@ -149,7 +153,7 @@ def refused_ops(st: Any) -> dict[str, str]:
     """op -> why, for calls that never ran because Claude Code refused them,
     and no outcome was recorded: the mod's tool.call came back refused
     (`answered: deny`), or as an error in Claude Code's own refusal words
-    (`rejected`: a deny rule or hook, the person's No; 2.1.301), or as an
+    (`rejected`: a deny rule or hook, the person's No, an ask no one could answer), or as an
     error after a deny verdict. The verdict alone isn't enough (a hook above
     the observer may change it), nor an error after an ask (the call may
     have run and been cut off)."""
@@ -431,7 +435,7 @@ def _right_word(v: Any) -> str:
 
 def _right_now(rights: dict[str, Any] | None, verb: str) -> str:
     """The right's value now from an entry's `rights` (by its own name, or
-    its 0.9 action), '' when the snapshot doesn't say."""
+    its action), '' when the snapshot doesn't say."""
     if rights is None:
         return ""
     for k in (verb, VERB_ACTION.get(verb, "")):
@@ -455,7 +459,7 @@ def check(refs: Refs, snap_hosts: list[dict[str, Any]] | None, gw_why: str, host
           cwd: str, root: str = "", snap_accounts: list[dict[str, Any]] | None = None) -> Check:
     """Each reference against now. `snap_hosts` / `snap_accounts`: the
     gateway's hosts and accounts now (cleaned; None when it couldn't be
-    asked, `gw_why` says why; accounts None too from a gateway before 0.9);
+    asked, `gw_why` says why; accounts None too for a snapshot that lists none);
     `host_states`: name -> hosts.HostNow (identity, authentication)."""
     out = Check()
     rules_now: dict[str, str] | None = None
@@ -487,10 +491,8 @@ def check(refs: Refs, snap_hosts: list[dict[str, Any]] | None, gw_why: str, host
                 out.unknown.append(f"{what}: not compared ({gw_why}); the gateway checks it again at each use")
                 continue
             if rec is None:
-                if snap_accounts is None and host not in by_name:
-                    out.flagged.append(f"{what}: REVOKED: host {host} is no longer in the gateway's configuration")
-                else:
-                    out.flagged.append(f"{what}: REVOKED: {host} is no longer in the gateway's configuration")
+                out.flagged.append(f"{what}: REVOKED: {host} is no longer in the gateway's configuration (as a "
+                                   "host or an account)")
                 continue
             problems = []
             hn = host_states.get(host)
@@ -514,7 +516,7 @@ def check(refs: Refs, snap_hosts: list[dict[str, Any]] | None, gw_why: str, host
             elif not now_w:
                 # only the host's presence was compared: not the right itself
                 out.unknown.append(f"{what}: not compared: " + (
-                    f"this gateway's snapshot lists no rights for {host} (gateway 0.8 lists none)"
+                    f"the gateway's snapshot lists no rights for {host}"
                     if _rights_of(rec) is None else
                     f"the gateway's snapshot doesn't list this right for {host}")
                     + f"; {host} is still configured, and the gateway checks the right again at each use")
@@ -524,7 +526,7 @@ def check(refs: Refs, snap_hosts: list[dict[str, Any]] | None, gw_why: str, host
             if snap_hosts is None:
                 out.unknown.append(f"{what}: not compared ({gw_why}); the gateway checks it again at each use")
             elif snap_accounts is None:
-                out.unknown.append(f"{what}: not compared (this gateway's snapshot lists no accounts: before 0.9)")
+                out.unknown.append(f"{what}: not compared (the gateway's snapshot lists no accounts)")
             elif r.name not in by_acc:
                 out.flagged.append(f"{what}: REVOKED: the account is no longer in the gateway's configuration")
             else:

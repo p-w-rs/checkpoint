@@ -32,8 +32,8 @@ Reference:
 - **Commands** (typed by you; Claude can't run them):
   - `/check-pause`: pause now, even while Claude is busy: the running turn
     stops at once and every tool call is held. A running Bash command is
-    left running (it says so) unless you add `now`. Needs Claude Code
-    2.1.287+ in the terminal or 2.1.286+ in the desktop app (mods);
+    left running (it says so) unless you add `now`. Needs mods (the
+    latest Claude Code, in the terminal or the desktop app);
     `/check-doctor` says whether they are on.
   - `/check:pause`: pause this session. Answered at once when idle; typed
     while Claude is busy it waits until the turn ends (Claude Code keeps a
@@ -97,8 +97,8 @@ Reference:
   - `/check:save` (or `/check-save`, at once): checkpoint now: the task's
     state goes to the journal, synced to disk, without stopping anything.
     `/check-list` lists this task's checkpoints.
-  - `/check:doctor` (or `/check-doctor`, at once): versions, pixi and its
-    tested range, the runtime, the gate, the state folder, and any gateway
+  - `/check:doctor` (or `/check-doctor`, at once): versions, pixi's
+    version, the runtime, the gate, the state folder, and any gateway
     job unknown for over 7 days with no word from the gateway (with the
     terminal command that releases it).
   - Typing just `pause` (or `pause now`, `pause all`) also works; typed
@@ -129,9 +129,10 @@ Reference:
 - **Trackers:** for multi-step tasks Claude keeps
   `.work/<task>/TRACKER.md`: stages with status, the current step and
   next action, jobs, resume notes. Stages become "accepted" only when you say
-  so in chat. Claude is reminded to keep it current. In a git repo it adds
-  `.work/` to the clone's local exclude file, so trackers aren't committed
-  unless you want them to be. `CHECKPOINT_TRACKERS=off` turns trackers off:
+  so in chat. Claude is reminded to keep it current. In a git repo Claude
+  adds `.work/` to the clone's local exclude file, so trackers aren't
+  committed unless you want them to be; checkpoint itself writes nothing
+  into your projects. `CHECKPOINT_TRACKERS=off` turns trackers off:
   no tracker instructions, no reminders, no "update the tracker" stop; the
   journal still records everything.
 - **Jobs:** work longer than ~2 minutes runs through the job tools as a
@@ -139,7 +140,10 @@ Reference:
   status and logs via `job_status` / `job_tail`. Starting a job goes through
   Claude Code's usual permission check, like a Bash command; checking or
   stopping one doesn't ask. With the gateway plugin running, the gateway
-  starts and supervises each job (`job_status` says `supervisor: gateway`)
+  starts and supervises each job (`job_status` says `supervisor: gateway`),
+  with your session's environment minus credential variables (Claude
+  Code's own, and names such as `GH_TOKEN`; `SSH_AUTH_SOCK` stays) and
+  the git config entries in it that hold one,
   and applies its `on_pause` policy when you pause: continue (the default),
   interrupt, suspend or detach (per job, or for the task with
   `task_policy`); a pause says what each policy did, a resume undoes it,
@@ -151,10 +155,12 @@ Reference:
   --stop-jobs` stops them), in the gateway's environment when its env file
   is there (status shows "gateway env applied"). Other plugins, when
   installed, check a job's command at
-  `job_start`: the gateway refuses curl/wget, its private folder and
-  transcripts, rights set to false and any "ask" right, and never approves
-  a job by itself; pixi-guard refuses Python outside pixi. The gateway
-  masks what `job_tail`/`job_status`/`job_stop` show Claude (not a failed
+  `job_start`: nobody can be asked while a job runs, so the gateway
+  refuses a network command such as curl unless its `[network]` setting
+  allows it (out of the box it asks about those in Bash), its private
+  folder and transcripts, anything set to false and any "ask" right, and
+  never approves a job by itself; pixi-guard refuses Python outside pixi.
+  The gateway masks what `job_tail`/`job_status`/`job_stop` show Claude (not a failed
   `job_stop`'s error text, which no hook can rewrite; it warns instead).
   A job still running after its Claude session ends can no longer use the
   gateway's keys, passwords or git credentials, except from entries with

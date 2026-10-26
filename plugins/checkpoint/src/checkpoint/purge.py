@@ -7,9 +7,8 @@ Retention (state.prune, recovery.prune_tasks) removes old records on its own
 while the plugin runs; this is the way to remove them now, and before an
 uninstall. Both read the process table first and refuse without one
 (invariant 11: without a table nothing is known to be dead). The projects'
-own folders (`<project>/.work/`: trackers and checkpoint.json) belong to
-the person: never touched here, only named, with the command that removes
-them.
+tracker folders (`<project>/.work/`, Claude's notes) belong to the person:
+never touched here, only named, with the command that removes them.
 """
 from __future__ import annotations
 
@@ -25,10 +24,9 @@ from . import jobs, journal, procs, sanitize, state
 SESSION_FILES = ("now", "pending", "seen", "queued", "trackers", "count", "turn", "turn-start", "rt",
                  "degraded", "noresume", "flags")
 # Top-level files that are history or caches, never needed by a live session.
-TOP_FILES = ("pruned", "degraded-seen", "session-start.err", "paused-all", "now-all")
-# Kept: the terminal helper (rewritten at every session start), the state
-# lock, the marker that the folder's modes were made private.
-TOP_KEEP = ("checkpoint", ".lock", ".modes-v1")
+TOP_FILES = ("pruned", "degraded-seen", "session-start.err")
+# Kept: the terminal helper (rewritten at every session start), the state lock.
+TOP_KEEP = ("checkpoint", ".lock")
 # A spool with no session record may belong to a session that started
 # before any runtime could record it: kept while this recent.
 SPOOL_RECENT_SECONDS = 86400
@@ -120,21 +118,21 @@ def _drop_jobs(ids: list[str], dry_run: bool) -> None:
 
 
 def _work_folders(recs: list[dict[str, Any]]) -> list[str]:
-    """Tracker folders in the projects (checkpoint.json beside a tracker)
-    that these sessions wrote: named, never removed."""
-    home = state.home().resolve()
-    out = []
+    """Tracker folders in the projects that these sessions worked on (each
+    session record's `tracker`: the real path, where a checkpoint's is
+    scrubbed), once per folder however spelled: named, never removed."""
+    out, seen = [], set()
     for s in recs:
-        cp = s.get("checkpoint") or ""
-        if not cp:
+        t = s.get("tracker")
+        p = Path(t).parent if isinstance(t, str) and t else None
+        if p is None or not p.is_dir():
             continue
-        p = Path(cp).parent
         try:
-            p.resolve().relative_to(home)
-            continue      # checkpoints/<session>.json in the state folder
-        except (ValueError, OSError):
-            pass
-        if p.is_dir() and str(p) not in out:
+            real = str(p.resolve())
+        except (OSError, RuntimeError):
+            real = str(p)
+        if real not in seen:
+            seen.add(real)
             out.append(str(p))
     return out
 
@@ -240,7 +238,7 @@ def forget(ref: str, sid: str = "", cwd: str = "", dry_run: bool = False) -> tup
         tail += (" Kept as they were, since journaling them failed: the spools of "
                  + "; ".join(f"{s[:8]} ({sanitize.clip(e, 80)})" for s, e in kept_spools[:5]) + ".")
     if work:
-        tail += (" Left alone (your project's tracker folders, with their checkpoint.json): "
+        tail += (" Left alone (your project's tracker folders): "
                  + ", ".join(work[:5]) + "; `rm -rf <folder>` removes one.")
     return True, head + tail
 
@@ -312,7 +310,7 @@ def purge(dry_run: bool = False) -> tuple[bool, str]:
     except Exception:  # noqa: BLE001
         reg = {}
     # A kept session's (or kept task's) finished jobs stay: a paused one's
-    # checkpoint.json lists them, its resume compares them.
+    # pause-time checkpoint lists them, its resume compares them.
     done = [jid for jid, j in reg.items() if not jobs.is_live(j)
             and str(j.get("session_id") or "") not in keep_sids and (j.get("task_id") or "") not in keep_tasks]
     kept_done = [jid for jid, j in reg.items() if not jobs.is_live(j) and jid not in done]
@@ -366,10 +364,10 @@ def purge(dry_run: bool = False) -> tuple[bool, str]:
         lines.append(f"- Kept {len(recent_spools)} spool(s) written in the last day with no session record (a session "
                      "that may still run): " + ", ".join(s[:8] for s in recent_spools[:10]))
     lines.append(f"- Kept: the terminal helper ({home / 'checkpoint'}; rewritten at every session start)"
-                 + (f"; not checkpoint's, left alone: {', '.join(strangers[:10])}" if strangers else ""))
-    lines.append("Your projects' .work/ folders (trackers and checkpoint.json) are yours and stay: remove one with "
-                 "`rm -rf <project>/.work`, and the `.work/` line from the clone's exclude file "
-                 "(`git rev-parse --git-path info/exclude`)"
+                 + (f"; files it doesn't know (an earlier version's leftovers, or not checkpoint's), left alone: "
+                    f"{', '.join(strangers[:10])}" if strangers else ""))
+    lines.append("Your projects' .work/ folders (the trackers Claude wrote) are yours and stay: remove one with "
+                 "`rm -rf <project>/.work`"
                  + (f"; projects seen: {', '.join(projects[:10])}" if projects else "")
                  + ".")
     lines.append(f"To remove everything, the helper too, with no Claude Code session running: rm -rf '{home}'"

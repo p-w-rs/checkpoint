@@ -19,7 +19,7 @@ Claude gets this first (abridged):
          - 1 file(s) changed outside this task since checkpoint c_01k8...: app/models.py (...) never revert them.
 ```
 
-Plugin `check` 0.8.0, marketplace `checkpoint`. It works alone; with the
+Plugin `check` 0.9.0, marketplace `checkpoint`. It works alone; with the
 [gateway](https://github.com/p-w-rs/gateway) plugin, long jobs run under the
 gateway's supervision and the hosts a task used are checked before a resume.
 
@@ -33,10 +33,10 @@ gateway's supervision and the hosts a task used are checked before a resume.
   in the background: `check: setting up its runtime (first run); pausing
   works`, then `check: recording`.
 - **Trackers.** For tasks with several steps, Claude is asked to keep notes
-  in `<project>/.work/<task>/TRACKER.md` and to update them before it stops.
-  In a git repository `.work/` goes into the clone's local exclude file
-  (never committed), unless the repository already tracks it.
-  `CHECKPOINT_TRACKERS=off` turns trackers off.
+  in `<project>/.work/<task>/TRACKER.md`, to update them before it stops,
+  and in a git repository to add `.work/` to the clone's local exclude file
+  (never committed) unless you commit trackers. checkpoint itself writes
+  nothing into your projects. `CHECKPOINT_TRACKERS=off` turns trackers off.
 - **New commands:** `/check:*`, and `/check-*` forms that act at once, even
   mid-reply.
 - **While paused,** a status line: `check: paused · type a message (any
@@ -51,18 +51,20 @@ Nothing is added to your settings or permission rules.
 
 ## Requirements
 
-- **Claude Code 2.1.287 or newer** in the terminal, **2.1.286 or newer** in
-  the desktop app. These versions have mods, which checkpoint uses for its
+- **The latest Claude Code**, in the terminal or the desktop app; older
+  versions are not supported. checkpoint uses Claude Code's mods for the
   immediate `/check-*` commands, the footer label, the status line, the
-  Checkpoints pane and telling your messages from automated ones. Tested on
-  2.1.301 (macOS) and 2.1.304 (Linux). Without mods (VS Code, `claude -p`,
-  mods turned off) the hooks still record and the `/check:*` commands work,
-  but there are no immediate commands, label, status line or pane, a pause
-  waits for the next tool call, and any prompt resumes a paused session.
-  Older versions are untested; the hooks need at least 2.1.139 (exec form).
-- **pixi 0.68.0 or newer** (from pixi.sh). checkpoint brings its own Python
-  through it.
-- **git**, which Claude Code needs to add a marketplace from GitHub.
+  Checkpoints pane and telling your messages from automated ones. Without
+  mods (VS Code, `claude -p`, mods turned off) the hooks still record and
+  the `/check:*` commands work, but there are no immediate commands, label,
+  status line or pane, a pause waits for the next tool call, and any prompt
+  resumes a paused session.
+- **The latest pixi** (from pixi.sh); older versions are not supported.
+  Update it with `pixi self-update`, or your package manager (Homebrew,
+  MacPorts) if that installed it. checkpoint brings its own Python through
+  it (the newest from conda-forge).
+- **git**: Claude Code needs git for a GitHub marketplace; pixi can provide
+  it (`pixi global install git`, with `~/.pixi/bin` on your PATH).
 - **macOS or Linux.** Windows only through WSL 2 (untested). Tested on macOS
   (Apple silicon) and Debian 13 (ARM64); Intel Macs and Linux x86-64 are in
   the lock but untested.
@@ -91,7 +93,8 @@ Code tab click **+** → **Plugins** → **Add plugin** and choose **check**.
 1. Start a new session (or `/reload-plugins`). The footer goes from
    `check: setting up its runtime (first run); pausing works` to `check: recording`.
 2. Run `/check:help` and `/check:status`.
-3. Ask Claude to "run `sleep 60`, then say done", and type `/check-pause`
+3. Ask Claude to "run `sleep 20`, then say done" (keep it under 25 s:
+   Claude Code refuses a longer foreground `sleep`), and type `/check-pause`
    while it runs. Then type `go on`.
 4. `/check-save before the refactor`, then `/check-list`.
 5. Kill that Claude from another terminal: `pgrep -fl claude` lists the
@@ -156,14 +159,20 @@ decisions, open questions) and `task_policy` run without a prompt.
 rest).
 
 **Jobs and the gateway.** With the gateway serving the session,
-`job_start` hands the job to the gateway, which runs and supervises it.
-Each job has a pause policy: continue (the default), interrupt, suspend or
-detach; a pause says what each one did. A job the gateway refuses runs
-nowhere. The gateway also checks a job's command at `job_start`: it refuses
-`curl`/`wget`, its private folder and session transcripts, rights set to
-`false` and any `"ask"` right (nobody can be asked while a job runs; on a new
-gateway install, sudo on this computer is `"ask"`), and it never approves a
-job by itself. pixi-guard refuses Python outside pixi. The gateway masks what
+`job_start` hands the job to the gateway, which runs and supervises it with
+your session's environment, minus credential variables (Claude Code's own,
+and names such as `GH_TOKEN` or `PGPASSWORD`; `SSH_AUTH_SOCK` stays, so the
+job can use your ssh agent) and the git config entries in it that hold one
+(`GIT_CONFIG_*`, such as an `http.extraHeader`). Each job has
+a pause policy: continue (the default), interrupt, suspend or detach; a
+pause says what each one did. A job the gateway refuses runs nowhere. The
+gateway also checks a job's command at `job_start` as it checks Bash, but
+nobody can be asked while a job runs: it refuses a network command such as
+`curl` unless its `[network]` setting allows it, its private folder and
+session transcripts, anything set to `false` and any `"ask"` right, and it
+never approves a job by itself. A new gateway install names no machine or
+account and asks only about network commands. pixi-guard refuses Python
+outside pixi. The gateway masks what
 `job_tail`, `job_status` and `job_stop` show Claude, except a failed
 `job_stop`'s error text, which no hook can rewrite; it warns instead. More:
 the gateway's [With checkpoint](https://github.com/p-w-rs/gateway#with-checkpoint)
@@ -196,8 +205,8 @@ What it guarantees:
 - **Local only.** It sends nothing over the network; pixi downloads Python
   from conda-forge once. Resume notes go into Claude's context like any text.
 - **Private files.** The state folder is 0700, its files 0600.
-- **Scrubbed before writing:** the journal, `checkpoint.json` and exports.
-  File contents are never recorded.
+- **Scrubbed before writing:** the journal, the pause-time checkpoints and
+  exports. File contents are never recorded.
 - **Fails closed while paused:** if checkpoint can't check a call, it is held.
   Not paused, the call goes ahead and `/check:status` says so.
 - **No new rights.** `job_start` goes through Claude Code's permission check.
@@ -232,12 +241,12 @@ characters for a failed test), reasons for permission decisions.
 
 | What | Where | Kept |
 |---|---|---|
-| Journals | `~/.local/state/checkpoint/journal/` | finished tasks 30 days after their last activity, unfinished ones 180; never while a session of the task runs or is paused, or a job of it may still run |
+| Journals, with each session's pause-time checkpoint (`journal/<task>/checkpoint-<session>.json`) | `~/.local/state/checkpoint/journal/` | finished tasks 30 days after their last activity, unfinished ones 180; never while a session of the task runs or is paused, or a job of it may still run |
 | Session records, and the files a pause leaves | the state folder | 7 days after the session's last activity, once its Claude has quit and it isn't paused. The checkpoints `/check:list` shows are journal records, kept with the journal |
 | The spool (events waiting to be journaled) | `spool/<session>/` | seconds to a turn; raw while the runtime is ready or being set up, and without one only which tool ran, ids and sizes. Every session's spool holds at most 10,000 events or 50 MB; a spool goes 7 quiet days after its session is gone |
 | Jobs and their logs | `jobs/` | 14 days after the job ends. A gateway job whose outcome is unknown is kept until the gateway reports its end, or you release it (`checkpoint forget-job <job>`, after 7 days unknown; `/check:doctor` names them) |
 | Exports | `exports/`, or the path you gave | until you delete them |
-| Trackers and `checkpoint.json` | `<project>/.work/<task>/` | until you delete them |
+| Trackers (Claude's notes) | `<project>/.work/<task>/` | until you delete them |
 | The runtime (Python) | Claude Code's plugin data folder | rebuilt when missing; removed after 7 days unused, or by uninstall |
 
 Claude Code keeps its own transcripts of every session; nothing here
@@ -260,8 +269,8 @@ Everything, for good: see [Uninstall](#update-disable-uninstall).
 ## Limits
 
 - The desktop app is untested (the same mod runs there).
-- Without mods (older Claude Code, VS Code, `claude -p`, mods off), a pause
-  waits for the next tool call, and any prompt resumes a paused session.
+- Without mods (VS Code, `claude -p`, mods off), a pause waits for the next
+  tool call, and any prompt resumes a paused session.
 - `/check:pause` typed while Claude is busy waits for the turn to end. Use
   `/check-pause` or type `pause`.
 - An immediate pause leaves a running Bash command running unless you add
@@ -300,32 +309,25 @@ recording.
 they still have checkpoint's hooks and commands loaded, pointing at files
 that are gone.
 
-**What stays behind:** the state folder, your projects' `.work/` folders,
-the `.work/` line in each clone's exclude file, and exports you saved
-elsewhere. To remove everything:
+**What stays behind:** the state folder, the trackers Claude wrote in your
+projects' `.work/` folders (and a `.work/` line it added to a clone's
+exclude file), and exports you saved elsewhere. To remove everything:
 
 1. Optional, before uninstalling: `~/.local/state/checkpoint/checkpoint purge
    --dry-run` names the projects it has seen, where `.work/` folders may be.
 2. Uninstall, and restart open sessions.
 3. `rm -rf ~/.local/state/checkpoint` (or your `$CHECKPOINT_HOME`).
-4. In each project: `rm -rf .work`, and delete the `.work/` line from the
-   file `git rev-parse --git-path info/exclude` prints.
+4. In each project: `rm -rf .work`, and delete a `.work/` line from the file
+   `git rev-parse --git-path info/exclude` prints.
 
-**Upgrading.** Nothing to do; your history carries over (from 0.1, the
-journal starts with the first session after the update). Records written
+**Upgrading.** Nothing to do; your history carries over. Records written
 before 0.8.0 were scrubbed with fewer rules and kept failed commands' output,
-and older `checkpoint.json` files in projects weren't scrubbed at all.
-New exports scrub old records again with the new rules; exports made
-earlier stay as they were (delete them; `purge` removes those in the state
-folder). To drop old records, use `checkpoint forget` or `purge`, and delete
-old `.work/*/checkpoint.json` files. What changed: [CHANGELOG.md](CHANGELOG.md).
-
-**Rolling back.** Releases are tagged. To go back to one:
-`claude plugin marketplace remove checkpoint` (this uninstalls the plugin),
-then `claude plugin marketplace add p-w-rs/checkpoint#v0.7.3` and
-`claude plugin install check@checkpoint`. To follow new releases again,
-remove the marketplace and add it without the tag. Going back is untested;
-the state folder stays as it is.
+and `.work/*/checkpoint.json` files written into projects before 0.8.0
+weren't scrubbed at all. New exports scrub old records again; exports made
+earlier stay as they were. To drop old records, use `checkpoint forget` or
+`purge` (it also removes the exports in the state folder), and delete old
+`.work/*/checkpoint.json` files and exports saved elsewhere. What changed in
+each release: [CHANGELOG.md](CHANGELOG.md).
 
 ## Troubleshooting
 
@@ -344,10 +346,11 @@ gateway, the state folder and any stuck gateway job.
 
 ## Status
 
-0.8.0 was tested on macOS (Apple silicon, Claude Code 2.1.301) and Debian 13
-(ARM64, Claude Code 2.1.304): the test suite, and live Claude Code sessions
-driven against a stand-in model; the suite also on Intel macOS packages
-through Rosetta. Not tested: the desktop app, real x86-64 hardware. Details:
+0.9.0 was tested on macOS (Apple silicon) and Debian 13 (ARM64) with Claude
+Code 2.1.310 and pixi 0.83: the test suite, and live Claude Code sessions
+driven against a stand-in model, alone and with the gateway and pixi-guard;
+the suite also on Intel macOS packages through Rosetta. Not tested: the
+desktop app, real x86-64 hardware. Details:
 [docs/dev/TESTING.md](docs/dev/TESTING.md).
 
 ## Develop

@@ -1,2 +1,2 @@
 """checkpoint: pause Claude Code agents at a clean point and resume them."""
-__version__ = "0.8.0"
+__version__ = "0.9.0"

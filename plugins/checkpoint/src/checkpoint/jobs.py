@@ -28,13 +28,15 @@ Two supervisors, never both for one job (PLAN-v4 phase 4): with the gateway
 available (CONTRACT-v1 discovery, feature "jobs") a job is started through
 its contract (`POST /v1/jobs`: task_ref = the journal task, the session, the
 idempotency key `ck:<op>` from the tool call, on_pause from the call or the
-task's policy) and its registry record says `owner: "gateway"` with the
+task's policy; with the feature "job_env", `env`: the session's environment
+as the own runner gives it, minus credential names, gateway_job_env) and
+its registry record says `owner: "gateway"` with the
 gateway's job id (`gateway_job`); the gateway supervises it, and its state,
 tail and stop go through the contract. Otherwise the own runner above starts
-it (`owner: "checkpoint"`; records without an owner, 0.1-0.5's, are the own
-runner's too). A start that reached the gateway but got no whole answer is
-retried once with the same key (it returns the job if the first one started
-it) and never handed to the own runner: that could run the command twice.
+it (`owner: "checkpoint"`). A start that reached the gateway but got no
+whole answer is retried once with the same key (it returns the job if the
+first one started it) and never handed to the own runner: that could run the
+command twice.
 Once any attempt may have started it (ambiguous, or an answer that isn't
 CONTRACT-v1), whatever the retry gets (no answer, the socket gone, a
 refusal) the start's outcome is unknown, said with the key; only a start
@@ -128,6 +130,91 @@ def job_env(environ: dict[str, str] | None = None) -> dict[str, str]:
         env["PATH"] = os.pathsep.join(d for d in env["PATH"].split(os.pathsep)
                                       if not d.startswith(pixi_dirs))
     return env
+
+
+# Claude Code's own credential variables: the names the gateway's managed
+# shell removes (its envfile.CLAUDE_CRED_NAMES), the ones Claude Code itself
+# keeps from its subprocesses (2.1.310: ANTHROPIC_CUSTOM_HEADERS holds
+# headers such as `Authorization: Bearer ...`; ALL_INPUTS is GitHub Actions'),
+# and any CLAUDE_* or ANTHROPIC_* name holding one of its credential words
+# (managed.CREDENTIAL_WORDS).
+CC_CREDENTIAL_NAMES = ("CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_CLIENT_KEY",
+                       "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE", "CLAUDE_CODE_CLIENT_CERT",
+                       "CLAUDE_CODE_HOST_CREDS_FILE", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                       "ANTHROPIC_CUSTOM_HEADERS", "ALL_INPUTS")
+_CC_PREFIXES = ("CLAUDE_", "ANTHROPIC_")
+_CC_CREDENTIAL_WORDS = ("TOKEN", "SECRET", "PASSW", "PASSPHRASE", "CRED", "API_KEY", "APIKEY", "ACCESS_KEY",
+                        "PRIVATE_KEY", "CLIENT_KEY", "CLIENT_CERT", "AUTH", "COOKIE", "SESSION_KEY")
+# A socket, a pid or a program, never a secret (the gateway's
+# envfile.NOT_SECRET_NAMES, and Claude's Bash keeps them): SSH_AUTH_SOCK's
+# "auth" would drop it, and a gateway job couldn't use the ssh agent.
+NOT_SECRET_NAMES = ("SSH_AUTH_SOCK", "SSH_AGENT_PID", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE", "GIT_ASKPASS")
+
+
+def credential_name(name: str) -> bool:
+    """Is this variable a credential a gateway job doesn't get? Claude Code's
+    own (above), or a name the scrubber treats as sensitive
+    (sanitize.sensitive_name: GH_TOKEN, PGPASSWORD, AWS_SECRET_ACCESS_KEY, ...)
+    other than NOT_SECRET_NAMES."""
+    up = name.upper()
+    if name in CC_CREDENTIAL_NAMES or (up.startswith(_CC_PREFIXES) and any(w in up for w in _CC_CREDENTIAL_WORDS)):
+        return True
+    return name not in NOT_SECRET_NAMES and sanitize.sensitive_name(name)
+
+
+# git's config from the environment: GIT_CONFIG_COUNT with GIT_CONFIG_KEY_<n>
+# and GIT_CONFIG_VALUE_<n>, and GIT_CONFIG_PARAMETERS (what `git -c` passes on).
+_GIT_CONFIG_ENV = re.compile(r"GIT_CONFIG_(?:COUNT|PARAMETERS|(?:KEY|VALUE)_[0-9]+)")
+
+
+def git_config_secret(key: str, value: str) -> bool:
+    """Does a git config entry hold a credential? Its key names one
+    (sanitize.sensitive_name: *.password, imap.pass, credential.*), it is an
+    http.extraHeader (an Authorization header), or the scrubber masks
+    something in its key or value (a bearer token, user:pw@ in a URL)."""
+    return (sanitize.sensitive_name(key) or key.lower().endswith("extraheader")
+            or sanitize.scrub(key) != key or sanitize.scrub(value) != value)
+
+
+def _git_config_env(env: dict[str, str]) -> dict[str, str]:
+    """git's config variables of `env`, without the entries that hold a
+    credential, each kind as one unit: git stops on a GIT_CONFIG_COUNT whose
+    KEY_<n> or VALUE_<n> is missing, so the kept pairs are numbered again
+    from 0 with their own count; GIT_CONFIG_PARAMETERS goes whole or not at
+    all (also when it can't be read)."""
+    out: dict[str, str] = {}
+    count = env.get("GIT_CONFIG_COUNT", "")
+    if count.isascii() and count.isdigit() and len(count) < 10:
+        kept = []
+        for i in range(int(count)):
+            k, v = env.get(f"GIT_CONFIG_KEY_{i}"), env.get(f"GIT_CONFIG_VALUE_{i}")
+            if k is None or v is None:
+                break
+            if not git_config_secret(k, v):
+                kept.append((k, v))
+        if kept:
+            out["GIT_CONFIG_COUNT"] = str(len(kept))
+            for i, (k, v) in enumerate(kept):
+                out[f"GIT_CONFIG_KEY_{i}"], out[f"GIT_CONFIG_VALUE_{i}"] = k, v
+    params = env.get("GIT_CONFIG_PARAMETERS")
+    if params is not None:
+        try:
+            entries = [w.partition("=") for w in shlex.split(params)]
+        except ValueError:
+            entries = None
+        if entries is not None and not any(git_config_secret(k, v) for k, _, v in entries):
+            out["GIT_CONFIG_PARAMETERS"] = params
+    return out
+
+
+def gateway_job_env(environ: dict[str, str] | None = None) -> dict[str, str]:
+    """The `env` a job the gateway runs gets (CONTRACT-v1 feature `job_env`):
+    job_env() minus every credential name (credential_name), and git's config
+    variables without the entries that hold a credential (_git_config_env)."""
+    env = job_env(environ)
+    out = {k: v for k, v in env.items() if not _GIT_CONFIG_ENV.fullmatch(k) and not credential_name(k)}
+    out.update(_git_config_env(env))
+    return out
 
 
 def _unsafe(st: os.stat_result, uid: int) -> str:
@@ -230,8 +317,8 @@ OWN_FINAL = ("exited", "killed", "vanished")
 
 
 def owner(rec: dict[str, Any]) -> str:
-    """Which supervisor runs it: "gateway" or "checkpoint" (the default: the
-    records of 0.1-0.5 have no owner)."""
+    """Which supervisor runs it: "gateway" or "checkpoint" (every record
+    says; anything but the gateway is the own runner)."""
     return "gateway" if rec.get("owner") == "gateway" else "checkpoint"
 
 
@@ -454,6 +541,8 @@ def _start_gateway(g: gateway.Gateway, name: str, command: str | None, argv: lis
         body["task_ref"] = task_id
     if agent:
         body["agent"] = sanitize.clip(agent, 80)
+    if g.has("job_env"):
+        body["env"] = gateway_job_env()     # the job runs with the session's environment, as in the own runner
     answer: dict[str, Any] | None = None
     errors: list[gateway.CallError] = []
     maybe_started = False     # an attempt reached the gateway and may have started it

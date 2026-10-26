@@ -96,7 +96,6 @@ def _hook_ppid() -> int:
 
 def _note_session(payload: dict[str, Any]) -> str:
     """Make sure the session record has cwd/transcript (and a Claude pid)."""
-    state.migrate_legacy()
     sid = payload.get("session_id") or ""
     if not sid:
         return ""
@@ -141,8 +140,6 @@ def session_main() -> int:
     if not sid:
         return 0
     try:
-        state.fix_modes()
-        state.migrate_legacy()
         state.sync_flag(sid)
         now = time.time()
         sess = state.load_session(sid)
@@ -844,7 +841,6 @@ def watch_fire(sid: str, tool_use_id: str) -> int:
     first, as typed (each may name another session, or all), just as the
     gate would at the next tool call. Prints the killed commands of this
     watcher's call, so the watcher knows to stop."""
-    state.migrate_legacy()
     sess = state.load_session(sid)
     killed: list[dict[str, Any]] = []
     self_now = False
@@ -880,7 +876,6 @@ def sync_pause(sid: str) -> int:
     give the session record its pause fields and write the checkpoint, as the
     gate's first deny would have (the mod's own gate denies first, so the
     Python gate never sees those calls)."""
-    state.migrate_legacy()
     if not state.is_paused(sid):
         print(json.dumps({"paused": False}))
         return 0

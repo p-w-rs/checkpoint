@@ -1,7 +1,7 @@
 """Trackers: <cwd>/.work/<task>/TRACKER.md (CHECKPOINT_WORK_DIR), kept by the agent.
 
-Hooks only read trackers (and write checkpoint.json next to them); they never
-change what the agent or the user wrote.
+Hooks only read trackers; they never change what the agent or the user wrote
+(the pause-time checkpoint lives in the state folder: core.checkpoint_path).
 """
 from __future__ import annotations
 

@@ -196,7 +196,8 @@ def tool_results(lines: list[str]) -> set[str]:
 def recent_tool_calls(lines: list[str], n: int = 10) -> list[dict[str, Any]]:
     """The last n tool calls, each its tool and a brief of its input as the
     journal keeps it (sanitize.tool_input: scrubbed, never file contents or
-    an unknown tool's raw input): checkpoint.json lands in the project."""
+    an unknown tool's raw input): a resume puts the checkpoint into Claude's
+    context."""
     calls: list[dict[str, Any]] = []
     for line in lines:
         if '"tool_use"' not in line:

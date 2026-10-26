@@ -1,9 +1,10 @@
 # What the scrubber masks, and what it misses
 
-> Developer reference for checkpoint 0.8.0 (`src/checkpoint/sanitize.py`). The short version is in the README's [Security and privacy](../../README.md#security-and-privacy).
+> Developer reference for checkpoint 0.9.0 (`src/checkpoint/sanitize.py`). The short version is in the README's [Security and privacy](../../README.md#security-and-privacy).
 
-Everything checkpoint writes to its journal, to `checkpoint.json` and to an
-export goes through `sanitize.scrub` first. It works on patterns. It holds
+Everything checkpoint writes to its journal, to a pause-time checkpoint
+(`journal/<task>/checkpoint-<session>.json`) and to an export goes through
+`sanitize.scrub` first. It works on patterns. It holds
 no list of your real secrets to compare against, so a secret in a form it
 doesn't know stays as it is. That is why every export starts with a line
 asking you to review it before sharing.

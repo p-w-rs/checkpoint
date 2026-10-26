@@ -524,25 +524,23 @@ def notification_records(raw: str, base: dict[str, Any], note: dict[str, Any]) -
     return out
 
 
-# Tools that report on work started in the background (2.1.301 has the
-# notifications above; these are older or flag-gated names): their result
-# says a status, maybe an exit code, for a task id.
-BG_OUTPUT_TOOLS = ("TaskOutput", "BashOutput", "BashOutputTool", "AgentOutputTool", "AgentOutput")
-BG_STOP_TOOLS = ("TaskStop", "KillShell", "KillBash")
+# Claude Code's tool that stops work started in the background (its ends
+# come as the notifications above): its result says a status, maybe an exit
+# code, for a task id (`task_id`; `shell_id` is the name it still accepts).
+BG_STOP_TOOLS = ("TaskStop",)
 
 
 def _bg_tool_records(tool: str, inp: Any, resp: Any, base: dict[str, Any], op: str) -> list[dict[str, Any]]:
-    """A `background.result` for a TaskOutput-like or TaskStop-like call's
-    result, keyed by the task id it names (the start's background id)."""
+    """A `background.result` for a TaskStop call's result, keyed by the task
+    id it names (the start's background id)."""
     inp = inp if isinstance(inp, dict) else {}
-    key = next((str(inp[k]) for k in ("task_id", "bash_id", "shell_id", "agentId", "id") if inp.get(k)), "")
+    key = next((str(inp[k]) for k in ("task_id", "shell_id") if inp.get(k)), "")
     if not key:
         return []
     r = resp if isinstance(resp, dict) else {}
     t = r.get("task") if isinstance(r.get("task"), dict) else r
     status = str(t.get("status") or r.get("status") or "").lower()
-    if tool in BG_STOP_TOOLS:
-        status = "killed" if status in ("", "killed", "stopped", "success", "ok") else status
+    status = "killed" if status in ("", "killed", "stopped", "success", "ok") else status
     data: dict[str, Any] = {"task_id": sanitize.clip(key, 80), "status": sanitize.clip(status or "notice", 20),
                             "final": status in FINAL_STATUSES, "via": tool}
     ex = sanitize.stated_exit(t) if isinstance(t, dict) else None
@@ -550,8 +548,7 @@ def _bg_tool_records(tool: str, inp: Any, resp: Any, base: dict[str, Any], op: s
         ex = sanitize.stated_exit(r)
     if ex is not None:
         data["exit"] = ex
-    if tool in BG_STOP_TOOLS:
-        data["requested"] = True   # the model asked for the stop; the call's own outcome says if it worked
+    data["requested"] = True   # the model asked for the stop; the call's own outcome says if it worked
     return [dict(base, kind="background.result", op=f"bgr:{key}:{status or 'notice'}:{op}", data=data)]
 
 
@@ -702,7 +699,7 @@ def records_for(e: Event, sid: str) -> list[dict[str, Any]]:
         if e.get("duration_ms") is not None:
             data["duration_ms"] = e.get("duration_ms")
         out = [dict(base, kind="tool.outcome", op=op, data=data)]
-        if ev == "PostToolUse" and e.payload is not None and tool in BG_OUTPUT_TOOLS + BG_STOP_TOOLS:
+        if ev == "PostToolUse" and e.payload is not None and tool in BG_STOP_TOOLS:
             out.extend(_bg_tool_records(tool, inp, e.payload.get("tool_response"), base, op))
         return out
     if ev == "Stop":

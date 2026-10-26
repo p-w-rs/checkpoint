@@ -61,11 +61,41 @@ def git_snapshot(cwd: str) -> dict[str, Any]:
             "diff_stat": _git(cwd, "diff", "--stat").strip().splitlines()[-1:] or []}
 
 
-def checkpoint_path(sid: str, t: dict[str, Any] | None) -> Path:
-    """Next to this session's own tracker, else in the state dir."""
-    if t:
-        return Path(t["path"]).parent / "checkpoint.json"
+def checkpoint_path(sid: str) -> Path:
+    """Where the session's pause-time checkpoint goes, always in the state
+    folder (never the user's project): next to its task's journal
+    (journal/<task>/checkpoint-<session>.json: retention and forget remove it
+    with the journal), else, while the task has no journal yet,
+    checkpoints/<session>.json."""
+    task = state.load_session(sid).get("task_id") or ""
+    if task and journal.jdir(task).is_dir():
+        return journal.jdir(task) / f"checkpoint-{state.safe_id(sid)}.json"
     return state.p("checkpoints", state.safe_id(sid) + ".json")
+
+
+def tracker_key(path: str) -> str:
+    """A tracker's match key: the sha256 of its resolved path. A checkpoint
+    keeps it unscrubbed beside its scrubbed `tracker` path, so another
+    spelling of the path (a symlink) or a name the scrubber masks still
+    finds the checkpoint."""
+    try:
+        real = str(Path(path).resolve())
+    except (OSError, RuntimeError):
+        real = path
+    return hashlib.sha256(real.encode("utf8", "surrogateescape")).hexdigest()
+
+
+def tracker_checkpoint(t: dict[str, Any]) -> dict[str, Any] | None:
+    """The newest pause-time checkpoint written for this tracker (its
+    `tracker_key`), whichever session wrote it, or None."""
+    key = tracker_key(t["path"])
+    found: list[tuple[float, dict[str, Any]]] = []
+    for f in [*state.p("journal").glob("*/checkpoint-*.json"), *state.p("checkpoints").glob("*.json")]:
+        cp = state.read_json(f, None)
+        if isinstance(cp, dict) and cp.get("tracker_key") == key:
+            with contextlib.suppress(OSError):
+                found.append((f.stat().st_mtime, cp))
+    return max(found, key=lambda x: x[0])[1] if found else None
 
 
 def _cp_jobs(sid: str) -> list[dict[str, Any]]:
@@ -81,19 +111,19 @@ def _cp_jobs(sid: str) -> list[dict[str, Any]]:
 
 
 def write_checkpoint(sid: str, reason: str = "", dirs: Iterable[str] | None = None) -> Path:
-    """Plain facts at pause time. Written by the gate on its first deny and
-    refreshed by Stop (which doesn't fire when continue:false ends a turn).
-    Next to a tracker it lands in the user's project, so everything in it is
-    scrubbed here (the commands of the last calls, the jobs and the
-    interrupted commands; then the whole of it once more), and the work
-    folder is kept out of git (ensure_excluded)."""
+    """Plain facts at pause time, in the state folder (checkpoint_path).
+    Written by the gate on its first deny and refreshed by Stop (which
+    doesn't fire when continue:false ends a turn). A resume puts it into
+    Claude's context, so everything in it is scrubbed here (the commands of
+    the last calls, the jobs and the interrupted commands; then the whole of
+    it once more). `tracker` names this session's own tracker, if any, and
+    `tracker_key` (added after the scrub) finds it again; the session record
+    keeps the tracker's real path (`tracker`) for forget and purge."""
     sess = state.load_session(sid)
     cwd = sess.get("cwd") or ""
     t = session_tracker(sid, list(dirs) if dirs is not None else [cwd])
     lines = transcript.tail_lines(sess["transcript_path"]) if sess.get("transcript_path") else []
-    path = checkpoint_path(sid, t)
-    if t:
-        ensure_excluded(path)     # first: the git state below then doesn't list the work folder
+    path = checkpoint_path(sid)
     data = {
         "session_id": sid,
         "cwd": cwd,
@@ -110,74 +140,15 @@ def write_checkpoint(sid: str, reason: str = "", dirs: Iterable[str] | None = No
                              command=sanitize.clip(sanitize.scrub(c.get("command") or ""), 300))
                         for c in sess.get("interrupted") or [] if isinstance(c, dict)],
     }
-    state.write_json(path, sanitize.scrub_value(data))
+    state.write_json(path, sanitize.scrub_value(data) | {"tracker_key": tracker_key(t["path"]) if t else None})
+    early = state.p("checkpoints", state.safe_id(sid) + ".json")
+    if path != early:
+        state.remove(early)       # written before the task had a journal: this one replaces it
     state.update_session(sid, checkpoint=str(path), checkpoint_written=True,
-                         task=t["slug"] if t else sess.get("task"))
+                         task=t["slug"] if t else sess.get("task"),
+                         tracker=t["path"] if t else sess.get("tracker"))
     pause_checkpoint(sid)
     return path
-
-
-def ensure_excluded(path: Path) -> str:
-    """Keep the work folder (CHECKPOINT_WORK_DIR) that holds `path` out of
-    git: when `path` is in a git work tree and git doesn't ignore it yet,
-    append the folder to the clone's local exclude file (`git rev-parse
-    --git-path info/exclude`, never committed). Never when the repository
-    tracks anything in that folder (the user commits trackers), and never
-    twice (git check-ignore says when it is ignored already, and the line
-    already in the file is never added again: a `!.work/` in .gitignore
-    keeps check-ignore saying no). Returns what
-    it did ('' when nothing; never raises: the checkpoint is written
-    either way)."""
-    try:
-        name = state.work_dir_name().strip("/")
-        work = path.parent.parent          # <project>/<work>/<task>/checkpoint.json
-        if not name or not str(work).endswith("/" + name) or not work.is_dir():
-            return ""
-        here = str(work.parent)
-        rc, _ = _git_rc(here, "check-ignore", "-q", str(path))
-        if rc != 1:
-            return ""      # ignored already (0), or not a repository / git missing (128, -1)
-        rc, tracked = _git_rc(here, "ls-files", "--", str(work))
-        if rc != 0 or tracked.strip():
-            return ""      # the repository tracks trackers there: the user's choice
-        rc, top = _git_rc(here, "rev-parse", "--show-toplevel")
-        rc2, exc = _git_rc(here, "rev-parse", "--git-path", "info/exclude")
-        if rc or rc2 or not top.strip() or not exc.strip():
-            return ""
-        rel = os.path.relpath(work.resolve(), Path(top.strip()).resolve())
-        if rel.startswith(".."):
-            return ""
-        # The session note's form (`.work/`, any depth) for a plain name;
-        # anchored at the top when the name has folders in it.
-        line = f"{name}/" if "/" not in name else f"/{rel}/"
-        target = Path(here, exc.strip())
-        try:
-            # Never twice: a `!.work/` in .gitignore keeps check-ignore saying
-            # "not ignored" whatever the exclude file holds. (Two sessions
-            # writing their first checkpoint at the same moment can still both
-            # append it: the look and the append are two steps. A second line
-            # is harmless.)
-            if line in target.read_text(errors="replace").splitlines():
-                return ""
-        except FileNotFoundError:
-            pass
-        target.parent.mkdir(parents=True, exist_ok=True)
-        new = not target.exists()
-        fd = os.open(target, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o666)
-        try:
-            if new:
-                os.fchmod(fd, 0o666 & ~state.user_umask())   # the user's file, not checkpoint's (077)
-            lead = ""
-            if not new and target.stat().st_size:
-                with open(target, "rb") as f:
-                    f.seek(-1, 2)
-                    lead = "" if f.read(1) == b"\n" else "\n"
-            os.write(fd, f"{lead}{line}\n".encode())
-        finally:
-            os.close(fd)
-        return f"added {line} to {target}"
-    except (OSError, ValueError):
-        return ""
 
 
 def pause_checkpoint(sid: str) -> str:
@@ -337,8 +308,7 @@ def find_task(ref: str, cwd: str = "", sid: str = "") -> str:
 
 # -- pause --------------------------------------------------------------------
 
-# Why `pause now` couldn't stop a command: the `why` of an `unstopped` entry
-# (records from before it was kept say nothing: the process table).
+# Why `pause now` couldn't stop a command: the `why` of an `unstopped` entry.
 WHY_UNSTOPPED = {"ps": "the process table couldn't be read (ps failed)",
                  "sigkill": "their processes were still running after SIGKILL"}
 
@@ -583,15 +553,12 @@ def pause(sid: str, args: list[str], by: str, echo: dict[str, Any] | None = None
 # -- resume -------------------------------------------------------------------
 
 def _paused_since(cp: dict[str, Any]) -> float | None:
-    """When the pause began, as epoch seconds. paused_ts is an epoch, so a
-    laptop that changed time zone while paused still gets the right figure;
-    older checkpoints only have paused_at (local time with its offset)."""
-    if cp.get("paused_ts"):
-        try:
-            return float(cp["paused_ts"])
-        except (TypeError, ValueError):
-            pass
-    return state.iso_ts(cp.get("paused_at") or "")
+    """When the pause began, as epoch seconds (paused_ts: an epoch, so a
+    laptop that changed time zone while paused still gets the right figure)."""
+    try:
+        return float(cp["paused_ts"]) if cp.get("paused_ts") else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _changes_since(cp: dict[str, Any], cwd: str) -> list[str]:
@@ -698,8 +665,8 @@ def resume_here(sid: str, dirs: Iterable[str] | None = None, prompt: str = "") -
     if not t:
         t = session_tracker(sid, dirs)
     cp = state.read_json(Path(sess["checkpoint"]), None) if sess.get("checkpoint") else None
-    if cp and cp.get("session_id") not in (None, sid):
-        cp = None  # written by another session (before 0.2, the fallback could do that)
+    if cp and cp.get("session_id") != sid:
+        cp = None  # another session's checkpoint is never this session's
     chosen = sess.get("resume_from") or ""
     ctx = resume_context(t, cp, cwd, sid=sid, checkpoint=chosen, prompt=prompt, selected=bool(chosen))
     if gw:
@@ -744,7 +711,7 @@ def resume_task(cwd: str, slug: str, sid: str = "", prompt: str = "",
         reopened = adopt(sid, task)
         if chosen:
             journal_event(sid, "checkpoint.selected", id=chosen)
-    cp = state.read_json(Path(t["path"]).parent / "checkpoint.json", None) if t else None
+    cp = tracker_checkpoint(t) if t else None
     ctx = resume_context(t, cp, cwd, sid=sid, task=task, checkpoint=chosen, prompt=prompt, selected=bool(chosen),
                          why="select" if chosen else "resume task")
     if reopened:
@@ -888,7 +855,8 @@ def stop_failure(j: dict[str, Any], r: dict[str, Any]) -> str:
 
 def task_jobs(sid: str, task: str) -> list[dict[str, Any]]:
     """Jobs that belong to the task (its id, or one of its sessions for a job
-    started before 0.5.0), not detached, and running or possibly running:
+    started while its session had no task yet), not detached, and running or
+    possibly running:
     the own runner's, and the gateway's in a live state or unknown (the
     gateway lost it or can't be asked: it may still run, so cancel tries to
     stop it and says what came of that)."""
@@ -1346,9 +1314,9 @@ def gateway_doctor(sid: str = "") -> list[str]:
         if gp and not state.is_paused(sid):
             out.append("gateway: this session's resume hasn't reached the gateway yet (retried at the next moment "
                        "checkpoint runs)")
-        elif gp.get("held") and not gp.get("delivered"):
-            out.append("gateway: this session's pause may or may not have reached the gateway (its answer was lost) "
-                       "and isn't sent again while a job with on_pause interrupt could be signalled twice")
+        elif gp.get("uncertain") and not gp.get("delivered"):
+            out.append("gateway: this session's pause may or may not have reached the gateway (its answer was lost); "
+                       "sent again at the next moment checkpoint runs, with the same pause id (applied once)")
     return out + stuck_jobs_doctor()
 
 
@@ -1475,71 +1443,15 @@ def _pause_others(g: gateway.Gateway, sid: str, task: str, reason: str
     return lines, undo, recs
 
 
-PAUSE_RECHECK_SECONDS = 10.0   # a held pause's evidence is looked at again at most this often
+RETRY_WHY = "sent again with the same pause id (the gateway applies a pause once)"
 
 
 def pause_id(sid: str, mark: str, other: str = "") -> str:
     """The pause's id on the contract (`pause_id`): the same pause (this
     session and its mark; the other session it is sent for) always has the
-    same id, so a retry names the pause it repeats and a gateway that keeps
-    pause ids answers it without applying it again."""
+    same id, so a retry names the pause it repeats and the gateway answers
+    it without applying it again."""
     return "ckp-" + hashlib.sha256(f"{sid}\0{mark}\0{other}".encode("utf-8", "surrogatepass")).hexdigest()[:24]
-
-
-def _risky_jobs(g: gateway.Gateway, sid: str, task: str) -> list[dict[str, Any]]:
-    """This session's live gateway jobs (of the task) whose on_pause is
-    interrupt, from a fresh snapshot: the ones a second pause could send
-    SIGINT twice. CallError when the gateway can't be asked."""
-    snap = gateway.snapshot(g)
-    out = []
-    for j in (gateway.clean_job(x) for x in snap.get("jobs") or []):
-        if (j and j.get("session") == sid and (not task or j.get("task_ref") in (task, None, ""))
-                and j.get("state") in gateway.LIVE_STATES and j.get("on_pause") == "interrupt" and not j.get("detached")):
-            out.append(j)
-    return out
-
-
-def _retry_decision(g: gateway.Gateway, sid: str, task: str, gp: dict[str, Any], pid: str
-                    ) -> tuple[str, str, dict[str, Any]]:
-    """A pause whose delivery was uncertain (its answer was lost, or the
-    call broke after it was sent, or checkpoint died during it), at a later
-    moment: ("send", why) when sending it again can't signal a job twice (a
-    gateway that keeps pause ids; or none of the session's jobs has
-    on_pause interrupt); ("applied", evidence) when the gateway's own
-    `pause.applied` event shows it took it; ("hold", why, jobs) when it may
-    have and a second pause could send SIGINT again to an interrupt job
-    that ignored the first (or the gateway can't be asked): nothing is sent;
-    ("quiet", text) inside PAUSE_RECHECK_SECONDS of the last look."""
-    if g.has(gateway.PAUSE_ID_FEATURE):
-        return "send", "the gateway keeps pause ids: the same pause again is answered, never applied twice", {}
-    if gp.get("held") and time.time() - float(gp.get("checked_ts") or 0) < PAUSE_RECHECK_SECONDS:
-        return "quiet", str(gp.get("text") or ""), {}
-    try:
-        ev = gateway.pause_applied(g, sid, task, int(gp.get("since") or 0), gp.get("epoch"),
-                                   float(gp.get("sent_ts") or 0), pid)
-    except gateway.CallError as e:
-        return "hold", f"its events can't be read ({e.text()})", {"jobs": []}
-    if ev:
-        return "applied", "", ev
-    try:
-        risky = _risky_jobs(g, sid, task)
-    except gateway.CallError as e:
-        return "hold", f"its jobs can't be read ({e.text()})", {"jobs": []}
-    if not risky:
-        return "send", "no job of this session there has on_pause interrupt, so a second pause signals none twice", {}
-    return "hold", "", {"jobs": risky}
-
-
-def _held_text(why: str, risky: list[dict[str, Any]]) -> str:
-    names = _gw_names()
-    who = ", ".join(f"{names[j['job']]['name']} ({j['job']}, {j.get('state')})" if j["job"] in names else
-                    f"{j['job']} ({j.get('state')})" for j in risky[:5])
-    if risky:
-        return (f"Gateway: the pause's answer was lost and the gateway shows no sign it applied it; it is NOT sent "
-                f"again: a second pause would send SIGINT again to {who} (on_pause interrupt) if the first reached "
-                "them. /check:stop <job> stops one; checkpoint looks again at its next moments.")
-    return (f"Gateway: the pause's answer was lost and whether it applied it can't be told ({why}); it is NOT sent "
-            "again until that is known (a second pause could signal an on_pause interrupt job twice).")
 
 
 def gateway_pause(sid: str, reason: str = "pause") -> str:
@@ -1547,11 +1459,12 @@ def gateway_pause(sid: str, reason: str = "pause") -> str:
     pause: the gateway records the pause (its dialogs close, no new job or
     terminal input from this session) and applies each of the task's jobs'
     on_pause policy. Returns a line for the person ('' when there is no
-    gateway); records gateway.pause. A pause that certainly didn't reach it
-    is tried again at a later moment (gateway_settle). One that may have
-    (the answer lost, or checkpoint gone during the call: the session
-    record says so before it is sent) is sent again only when that can't
-    signal a job twice (`_retry_decision`), always with the same pause id."""
+    gateway); records gateway.pause. A pause that didn't reach it, or may
+    have (the answer lost, or checkpoint gone during the call: the session
+    record says "uncertain" before it is sent), is sent again at a later
+    moment (gateway_settle), always with the same pause id: the gateway
+    answers a pause id it has applied with that pause's first answer and
+    signals nothing again (CONTRACT-v1 `pause_id`, which discovery requires)."""
     if not sid or not state.is_paused(sid):
         return ""
     g = gateway.discover()
@@ -1569,59 +1482,25 @@ def gateway_pause(sid: str, reason: str = "pause") -> str:
         task = sess.get("task_id") or ""
         pid = pause_id(sid, mark)
         again = gp.get("mark") == mark and bool(gp.get("uncertain"))
-        sendwhy = ""
-        if again:
-            how, why, extra = _retry_decision(g, sid, task, gp, pid)
-            if how == "quiet":
-                return why
-            if how == "applied":
-                text = (f"Gateway: the pause reached it (its pause.applied event, seq {extra.get('seq')}; the first "
-                        "answer was lost, so each job's outcome is its state now).")
-                state.update_session(sid, gateway_paused={**gp, "delivered": True, "uncertain": False, "held": False,
-                                                          "text": text, "ts": time.time()})
-                _record(sid, "gateway.pause", {"ok": True, "task": task, "epoch": g.epoch, "pause_id": pid,
-                                               "answer_lost": True, "evidence": "pause.applied",
-                                               "evidence_seq": extra.get("seq"), "outcomes": []})
-                with contextlib.suppress(Exception):
-                    jobs.refresh_all()
-                return text
-            if how == "hold":
-                text = _held_text(why, extra.get("jobs") or [])
-                first = not gp.get("held")
-                state.update_session(sid, gateway_paused={**gp, "held": True, "checked_ts": time.time(), "text": text})
-                if first:
-                    _record(sid, "gateway.pause", {"ok": False, "held": True, "uncertain": True, "task": task,
-                                                   "epoch": g.epoch, "pause_id": pid,
-                                                   "jobs": [j["job"] for j in (extra.get("jobs") or [])][:20],
-                                                   "error": sanitize.clip(why or "may have been applied; not resent",
-                                                                          200)})
-                return text
-            sendwhy = why
         # Before it goes out: the session record says this pause may reach the
         # gateway (a checkpoint killed during the call leaves "uncertain",
-        # never "not sent"), with where to look for the gateway's evidence.
-        cur = gateway.load_cursor(sid)
-        first_try = {"since": int(cur.get("next") or 0) if cur.get("epoch") == g.epoch else 0,
-                     "epoch": g.epoch, "sent_ts": time.time()}
-        keep = {k: gp[k] for k in ("since", "epoch", "sent_ts") if again and k in gp}
+        # never "not sent").
         tries = int(gp.get("tries") or 0) + 1 if gp.get("mark") == mark else 1
-        state.update_session(sid, gateway_paused={"mark": mark, "pause_id": pid, "delivered": False, "uncertain": True,
-                                                  "task": task, "ts": time.time(), "tries": tries,
-                                                  **first_try, **keep})
+        pending = {"mark": mark, "pause_id": pid, "delivered": False, "uncertain": True, "task": task,
+                   "ts": time.time(), "tries": tries}
+        state.update_session(sid, gateway_paused=pending)
         try:
             r = gateway.pause(g, sid, task, reason, pid)
         except gateway.CallError as e:
             uncertain = e.kind in ("ambiguous", "protocol") or again
-            state.update_session(sid, gateway_paused={"mark": mark, "pause_id": pid, "delivered": False,
-                                                      "uncertain": uncertain, "task": task, "ts": time.time(),
-                                                      "tries": tries, **first_try, **keep})
+            state.update_session(sid, gateway_paused={**pending, "uncertain": uncertain, "ts": time.time()})
             _record(sid, "gateway.pause", {"ok": False, "error": sanitize.clip(e.text(), 200), "task": task,
                                            "epoch": g.epoch, "uncertain": uncertain, "pause_id": pid,
-                                           **({"retry": sanitize.clip(sendwhy, 200)} if again else {})})
+                                           **({"retry": RETRY_WHY} if again else {})})
             if uncertain:
                 return (f"Gateway: the pause may not have reached it ({e.text()}); its jobs' pause policies weren't "
-                        "confirmed. checkpoint looks for the gateway's own record of it at its next moment, and sends "
-                        "it again only if that can't signal a job twice.")
+                        "confirmed. checkpoint sends it again at its next moment, with the same pause id: the "
+                        "gateway applies a pause once, so no job is signalled twice.")
             if e.kind == "refused":
                 # The gateway's decision: nothing of it is done here instead (its jobs are the gateway's).
                 return (f"Gateway: it refused the pause ({e.text()}); its jobs' pause policies weren't applied and "
@@ -1654,7 +1533,7 @@ def gateway_pause(sid: str, reason: str = "pause") -> str:
         _record(sid, "gateway.pause", {"ok": True, "task": task, "epoch": g.epoch, "outcomes": outcomes,
                                        "dialogs_closed": closed, "pause_id": pid,
                                        **({"replayed": True} if r.get("replayed") is True else {}),
-                                       **({"retry": sanitize.clip(sendwhy, 200)} if again else {}),
+                                       **({"retry": RETRY_WHY} if again else {}),
                                        **({"others": o_rec} if o_rec else {})})
     # what the policies did shows in the jobs' states at once
     with contextlib.suppress(Exception):

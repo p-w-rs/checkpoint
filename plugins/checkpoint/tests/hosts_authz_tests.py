@@ -199,7 +199,7 @@ HG.hosts = host_recs(build={"reachable": False, "auth": None}, db={"reachable": 
                                                                   "runtime": "staging"})
 r8 = recovery.reconcile(HT_, HS_)
 l8 = {h.use.name: h.line() for h in r8.hosts}
-check("gateway 0.9's true / false / null states read the same: build unreachable (false) with authentication "
+check("the contract's true / false / null states read like the gateway's words: build unreachable (false) with authentication "
       "unknown (null); db reachable (true), NOT authenticated (false), its runtime being staged",
       "UNREACHABLE, authentication unknown" in l8["build"] and "reachable, NOT authenticated, runtime being staged"
       in l8["db"] and any("Host db [" in t and "NOT authenticated now" in t for t in r8.check_first()))
@@ -360,9 +360,9 @@ try:
           "settings rule `Bash(git push:*)` (allow): unchanged in your settings" in holds
           and "settings rule `Bash(make docs)` (approved): unchanged in your settings" in holds
           and not any("git push" in f or "ssh on build" in f or "make docs" in f for f in ra.authz.flagged))
-    check("...a gateway right the snapshot lists no rights for (gateway 0.8): not compared, said so, never 'still "
+    check("...a gateway right the snapshot lists no rights for: not compared, said so, never 'still "
           "holds' (only the host's presence could be compared)",
-          any('gateway right "ssh on build" (approved): not compared: this gateway\'s snapshot lists no rights' in u
+          any('gateway right "ssh on build" (approved): not compared: the gateway\'s snapshot lists no rights' in u
               and "build is still configured" in u for u in ra.authz.unknown)
           and not any('"ssh on build"' in x for x in ra.authz.holds))
     check("...(the resume context's Authorizations section: 'no need to ask the person again')",
@@ -379,7 +379,7 @@ try:
     check("revoked: the rule now denied in your settings, and build gone from the gateway: both in 'Check first' "
           "(don't rely on them; the person's OK again)",
           "Bash(git push:*)` (allow): CHANGED: allow then, deny now in your settings (revoked)" in flg
-          and 'gateway right "ssh on build" (approved): REVOKED: host build is no longer' in flg
+          and 'gateway right "ssh on build" (approved): REVOKED: build is no longer in the gateway' in flg
           and sum(1 for t in rb.check_first() if t.startswith("Authorization changed")) >= 2)
     (CFG_A / "settings.json").write_text(json.dumps({"permissions": {}}))
     HG.hosts = host_recs(build={"rights": {"exec": "deny", "read": "allow"}})
@@ -429,9 +429,9 @@ finally:
           any("gateway account github" in f and "REVOKED" in f for f in rf_.authz.flagged))
     HG.accounts = None
     rg_ = recovery.reconcile(TZ, SZ)
-    check("...a gateway before 0.9 (no accounts listed): not compared, said so",
+    check("...a snapshot that lists no accounts: not compared, said so",
           any("gateway account github" in u and "lists no accounts" in u for u in rg_.authz.unknown))
-check("gateway 0.9's policy wording: the action from the rule's key (or from what it covers), the target; never "
+check("the gateway's policy wording: the action from the rule's key (or from what it covers), the target; never "
       "the rule's text",
       authz.gateway_rights('gateway: running commands on the host (ssh HOST CMD, terminals, jobs) on build is denied by '
                            '[hosts.build.policy] exec = "deny" (gateway.toml line 12); ask the user if it should be '
@@ -448,6 +448,34 @@ check("gateway_rights reads only the gateway's fixed wording; another hook's tex
       and authz.gateway_rights("gateway: ssh is off for b (gateway.toml); ask") == ("off", ["ssh on b"])
       and authz.gateway_rights("my-plugin: no") == ("", [])
       and authz.gateway_rights('gateway: rm -rf / on x; y is set to "ask"') == ("ask", []))
+# Gateway 0.11: a right a per-mode table turns off names the mode the call was
+# judged in (hooks_bash._deny_right, modes.DISPLAY), and the right is kept.
+_OFF_TAIL = " (gateway.toml); ask the user if it should be on."
+_mode_rows = [(f"gateway: ssh is off for homelab in {m} mode" + _OFF_TAIL, ("off", ["ssh on homelab"]))
+              for m in ("Manual", "Plan", "Accept edits", "Auto", "Bypass permissions", "Don't ask")]
+_mode_rows += [("gateway: sudo is off for build in Auto mode" + _OFF_TAIL, ("off", ["sudo on build"])),
+               ("gateway: scp is off for nas-2.lan in Plan mode" + _OFF_TAIL, ("off", ["scp on nas-2.lan"])),
+               ("gateway: sudo is off on this machine in Auto mode (gateway.toml); ask the user if it should be on.",
+                ("off", ["sudo on this machine"])),
+               ("gateway: sudo is off on this machine in Don't ask mode (gateway.toml); ask the user.",
+                ("off", ["sudo on this machine"])),
+               ("gateway: sudo is off on this machine (gateway.toml); ask the user to turn it on.",
+                ("off", ["sudo on this machine"]))]
+_mode_bad = [(r, authz.gateway_rights(r)) for r, want in _mode_rows if authz.gateway_rights(r) != want]
+if _mode_bad:
+    print(f"       ({_mode_bad[:3]})")
+check("gateway 0.11's per-mode refusal (\"ssh is off for homelab in Auto mode (gateway.toml)\", every mode's name, "
+      "sudo on this machine too): the right is kept, as for a right that is off in every mode", not _mode_bad)
+check("...only the gateway's fixed wording: a mode name it never writes, or other words before \"(gateway.toml)\", "
+      "gives no right",
+      authz.gateway_rights("gateway: ssh is off for homelab in Turbo mode (gateway.toml); ask") == ("rule", [])
+      and authz.gateway_rights("gateway: sudo is off on this machine in Turbo mode (gateway.toml); ask")
+      == ("rule", [])
+      and authz.gateway_rights("gateway: sudo is off on this machine, and more") == ("rule", []))
+check("...and a per-mode table in a policy rule's text still names the action by what it covers, never a mode",
+      authz.gateway_rights("gateway: running commands on the host (ssh HOST CMD, terminals, jobs) on build is denied "
+                           "by [hosts.build.policy] exec = {Manual: ask · Auto: deny} (gateway.toml line 12); ask "
+                           "the user if it should be allowed.") == ("off", ["exec on build"]))
 
 # --- pause retries are idempotent ------------------------------------------------------------
 print("0.7.0: a pause whose answer was lost is never applied twice:")
@@ -475,84 +503,47 @@ def wait_hang():
 HG.hang_seconds = 3.0
 SQ, PQ, TPQ, EHQ, (JQ,) = pr_session("phold", [("intq", "interrupt")])
 HG.ignore_term.add(JQ)                      # it ignores SIGINT: a second one is what must not happen
-HG.hang["POST /v1/pause"] = 1
-HG.no_pause_event = True                    # applied, but its event doesn't show (the worst case)
+HG.hang["POST /v1/pause"] = 2               # the pause and the prompt hook's own resend (same id) right after it
 outq = hook("UserPromptSubmit", jbase(SQ, PQ, TPQ, prompt="/check:pause"), EHQ)
 gpq = state.load_session(SQ).get("gateway_paused") or {}
 check("a pause whose answer was lost (the gateway applied it: one SIGINT to the interrupt job, which ignored it): "
-      "uncertain, with its pause id; the pause says it may not have reached the gateway",
+      "uncertain, with its pause id; the pause says it may not have reached the gateway and goes again with the "
+      "same id",
       gpq.get("uncertain") is True and not gpq.get("delivered") and str(gpq.get("pause_id", "")).startswith("ckp-")
-      and HG.sigints.get(JQ) == 1 and "may not have reached it" in ctx(outq)
+      and HG.sigints.get(JQ) == 1 and "may not have reached it" in ctx(outq) and "same pause id" in ctx(outq)
       and pauses(SQ)[0]["body"].get("pause_id") == gpq.get("pause_id"))
+check(".../check:doctor says the pause may or may not have reached the gateway and goes again with the same id",
+      "sent again at the next moment checkpoint runs, with the same pause id" in core.doctor_text(SQ))
 wait_hang()
-HG.no_pause_event = False
 _n = len(pauses(SQ))
 o1 = hook("PreToolUse", jbase(SQ, PQ, TPQ, tool_name="Bash", tool_use_id="pq-1", tool_input={"command": "ls"}), EHQ)
-gpq = state.load_session(SQ).get("gateway_paused") or {}
-dump("pause-held", str(gpq.get("text")))
-check("the next paused moment: no sign the gateway applied it, and its job has on_pause interrupt: NOT sent again "
-      "(the job got exactly one SIGINT); held, said once in the journal; the call stays denied",
-      denied(o1) and len(pauses(SQ)) == _n and HG.sigints.get(JQ) == 1 and gpq.get("held") is True
-      and sum(1 for r in jrecs(task_of(SQ)) if r["kind"] == "gateway.pause" and r["data"].get("held")) == 1)
-_ev = len(HG.calls("GET", "/v1/events"))
+gpq2 = state.load_session(SQ).get("gateway_paused") or {}
+pzq = pauses(SQ)
+dump("pause-resent", str(gpq2.get("text")))
+check("the next paused moment sends it again with the same pause id; the gateway answers it as applied already "
+      "(replayed), so the interrupt job got exactly one SIGINT; delivered, the journal says it was a retry; the "
+      "call stays denied",
+      denied(o1) and len(pzq) == _n + 1 and pzq[-1]["body"].get("pause_id") == gpq.get("pause_id")
+      and HG.sigints.get(JQ) == 1 and gpq2.get("delivered") is True and "first answer again" in str(gpq2.get("text"))
+      and any(r["kind"] == "gateway.pause" and r["data"].get("ok") and r["data"].get("replayed")
+              and r["data"].get("retry") == core.RETRY_WHY for r in jrecs(task_of(SQ))))
 hook("PreToolUse", jbase(SQ, PQ, TPQ, tool_name="Bash", tool_use_id="pq-2", tool_input={"command": "ls"}), EHQ)
-check("...and the moments right after don't ask the gateway again (a held pause is looked at every few seconds)",
-      len(pauses(SQ)) == _n and HG.sigints.get(JQ) == 1)
-check(".../check:doctor says the pause may or may not have reached the gateway and isn't resent",
-      "isn't sent again while a job with on_pause interrupt could be signalled twice" in core.doctor_text(SQ))
-st_ = state.load_session(SQ).get("gateway_paused")
-state.update_session(SQ, gateway_paused={**st_, "checked_ts": 0})
-core.gateway_settle(SQ)
-check("...later looks (past the interval) still send nothing while that holds", len(pauses(SQ)) == _n
+check("...and once delivered, the moments after send nothing", len(pauses(SQ)) == _n + 1
       and HG.sigints.get(JQ) == 1)
 _r0 = len(HG.calls("POST", "/v1/resume"))
 outr = hook("UserPromptSubmit", jbase(SQ, PQ, TPQ, prompt="go on"), EHQ)
 rz_ = HG.calls("POST", "/v1/resume")
-check("a typed resume: /v1/resume with the same pause id (the pause may have applied: it is undone there)",
+check("a typed resume: /v1/resume with the same pause id",
       len(rz_) == _r0 + 1 and rz_[-1]["body"].get("pause_id") == gpq.get("pause_id") and not state.is_paused(SQ))
-# The gateway's own evidence: its pause.applied event after the lost answer.
-SE2, PE2, TPE2, EHE2, (JE2,) = pr_session("pevid", [("inte", "interrupt")])
-HG.ignore_term.add(JE2)
-HG.hang["POST /v1/pause"] = 1
-hook("UserPromptSubmit", jbase(SE2, PE2, TPE2, prompt="/check:pause"), EHE2)
-wait_hang()
-_n = len(pauses(SE2))
-hook("PreToolUse", jbase(SE2, PE2, TPE2, tool_name="Bash", tool_use_id="pe-1", tool_input={"command": "ls"}), EHE2)
-gpe = state.load_session(SE2).get("gateway_paused") or {}
-check("an answer lost but the gateway's pause.applied event shows it took the pause: delivered, nothing sent again "
-      "(one SIGINT), and the journal says how it was known",
-      gpe.get("delivered") is True and len(pauses(SE2)) == _n and HG.sigints.get(JE2) == 1
-      and any(r["kind"] == "gateway.pause" and r["data"].get("evidence") == "pause.applied"
-              for r in jrecs(task_of(SE2))))
-hook("UserPromptSubmit", jbase(SE2, PE2, TPE2, prompt="go on"), EHE2)
-# A gateway that keeps pause ids: the same pause again is answered, never applied twice.
-HG.features.append("pause_id")
-HG.write_contract()
-SF2, PF2, TPF2, EHF2, (JF2,) = pr_session("pids", [("intf", "interrupt")])
-HG.ignore_term.add(JF2)
-HG.hang["POST /v1/pause"] = 1
-hook("UserPromptSubmit", jbase(SF2, PF2, TPF2, prompt="/check:pause"), EHF2)
-wait_hang()
-hook("PreToolUse", jbase(SF2, PF2, TPF2, tool_name="Bash", tool_use_id="pf-1", tool_input={"command": "ls"}), EHF2)
-pzf = pauses(SF2)
-gpf = state.load_session(SF2).get("gateway_paused") or {}
-check("a gateway listing the pause_id feature: the retry goes out with the same pause id, the gateway answers the "
-      "first pause's outcomes, the job got one SIGINT, and the pause is delivered",
-      len(pzf) == 2 and pzf[0]["body"]["pause_id"] == pzf[1]["body"]["pause_id"] and HG.sigints.get(JF2) == 1
-      and gpf.get("delivered") is True)
-hook("UserPromptSubmit", jbase(SF2, PF2, TPF2, prompt="go on"), EHF2)
-HG.features.remove("pause_id")
-HG.write_contract()
-# Nothing a second pause could signal twice: sent again.
+# The same for a suspend job.
 SS2, PS2, TPS2, EHS2, (JSS,) = pr_session("psafe", [("suss", "suspend")])
 HG.hang["POST /v1/pause"] = 1
-HG.no_pause_event = True
 hook("UserPromptSubmit", jbase(SS2, PS2, TPS2, prompt="/check:pause"), EHS2)
 wait_hang()
-HG.no_pause_event = False
 hook("PreToolUse", jbase(SS2, PS2, TPS2, tool_name="Bash", tool_use_id="ps-1", tool_input={"command": "ls"}), EHS2)
-check("no job of the session has on_pause interrupt: the uncertain pause is sent again (the same pause id) and "
-      "delivered", len(pauses(SS2)) == 2 and (state.load_session(SS2).get("gateway_paused") or {}).get("delivered")
+check("a session whose job has on_pause suspend: the uncertain pause is sent again (the same pause id) and "
+      "delivered, the job suspended once",
+      len(pauses(SS2)) == 2 and (state.load_session(SS2).get("gateway_paused") or {}).get("delivered")
       and pauses(SS2)[0]["body"]["pause_id"] == pauses(SS2)[1]["body"]["pause_id"]
       and HG.jobs[JSS]["state"] == "suspended")
 hook("UserPromptSubmit", jbase(SS2, PS2, TPS2, prompt="go on"), EHS2)
@@ -580,22 +571,21 @@ finally:
 check("before /v1/pause goes out the session record already says it may reach the gateway (uncertain, its pause id)",
       _seen.get("uncertain") is True and str(_seen.get("pause_id", "")).startswith("ckp-")
       and _seen.get("delivered") is False)
-HG.no_pause_event = True
 gateway.pause(gateway.discover(), SC2, task_of(SC2), "test", _seen["pause_id"])      # it did reach it
-HG.no_pause_event = False
 _n = len(pauses(SC2))
 core.gateway_settle(SC2)
-check("...so after such a death the next moment holds the pause instead of sending it again (one SIGINT)",
-      len(pauses(SC2)) == _n and HG.sigints.get(JC2) == 1
-      and (state.load_session(SC2).get("gateway_paused") or {}).get("held"))
+check("...so after such a death the next moment sends it again with that pause id, and the gateway applies "
+      "nothing twice (one SIGINT); delivered",
+      len(pauses(SC2)) == _n + 1 and pauses(SC2)[-1]["body"].get("pause_id") == _seen["pause_id"]
+      and HG.sigints.get(JC2) == 1 and (state.load_session(SC2).get("gateway_paused") or {}).get("delivered"))
 hook("UserPromptSubmit", jbase(SC2, PC2, TPC2, prompt="go on"), EHC2)
 
 
 # A second pause command during the same pause is the same pause: its mark and
 # pause id stay, so a delivered pause isn't sent again and an uncertain one
-# still goes through the retry decision. (set_paused used to rewrite the flag,
-# and sync_flag took the new time for a new pause: a second /v1/pause with
-# another id, a second SIGINT to the interrupt job, the hold skipped.)
+# goes again only with its own id. (set_paused used to rewrite the flag, and
+# sync_flag took the new time for a new pause: a second /v1/pause with another
+# id, a second SIGINT to the interrupt job.)
 def pause_again(sid, proj, tp, eh):
     """Every route of a second pause command while `sid` is paused, each more
     than a second after the pause (sync_flag's tolerance); returns the
@@ -637,23 +627,6 @@ check("...the replies say the gateway's answer was the pause's first one, nothin
       "Already paused" in ty_a1 and "nothing was sent to the gateway again now" in ty_a1
       and "nothing was sent to the gateway again now" in ec_a1)
 hook("UserPromptSubmit", jbase(SA1, PA1, TPA1, prompt="go on"), EHA1)
-SA2, PA2, TPA2, EHA2, (JA2,) = pr_session("pag2u", [("inta2", "interrupt")])
-HG.ignore_term.add(JA2)
-HG.hang["POST /v1/pause"] = 1
-HG.no_pause_event = True                    # applied, but its event doesn't show
-hook("UserPromptSubmit", jbase(SA2, PA2, TPA2, prompt="/check:pause"), EHA2)
-gpa2 = state.load_session(SA2).get("gateway_paused") or {}
-wait_hang()
-HG.no_pause_event = False
-pause_again(SA2, PA2, TPA2, EHA2)
-gpa2b = state.load_session(SA2).get("gateway_paused") or {}
-check("an uncertain pause (the answer lost, the gateway applied it), then the same second pause commands: held by "
-      "the retry decision, nothing sent again, one SIGINT, the same pause id",
-      gpa2.get("uncertain") is True and len(pauses(SA2)) == 1 and HG.sigints.get(JA2) == 1
-      and gpa2b.get("held") is True and not gpa2b.get("delivered") and gpa2b.get("pause_id") == gpa2.get("pause_id"))
-hook("UserPromptSubmit", jbase(SA2, PA2, TPA2, prompt="go on"), EHA2)
-HG.features.append("pause_id")
-HG.write_contract()
 SA3, PA3, TPA3, EHA3, (JA3,) = pr_session("pag3i", [("inta3", "interrupt")])
 HG.ignore_term.add(JA3)
 HG.hang["POST /v1/pause"] = 2               # also the prompt hook's own resend (same id) right after it
@@ -662,14 +635,13 @@ gpa3 = state.load_session(SA3).get("gateway_paused") or {}
 wait_hang()
 pause_again(SA3, PA3, TPA3, EHA3)
 pza3 = pauses(SA3)
-check("...a gateway listing pause_id: the same second pause commands resend the pause only with its own id (the "
-      "gateway answers it as applied already), still one SIGINT, delivered",
+check("an uncertain pause (the answer lost, the gateway applied it), then the same second pause commands: the "
+      "pause goes again only with its own id (the gateway answers it as applied already), still one SIGINT, "
+      "delivered",
       gpa3.get("uncertain") is True and len(pza3) >= 2
       and {c["body"].get("pause_id") for c in pza3} == {gpa3.get("pause_id")}
       and HG.sigints.get(JA3) == 1 and (state.load_session(SA3).get("gateway_paused") or {}).get("delivered"))
 hook("UserPromptSubmit", jbase(SA3, PA3, TPA3, prompt="go on"), EHA3)
-HG.features.remove("pause_id")
-HG.write_contract()
 check("pause ids: the same pause gives the same id, another pause or session another",
       core.pause_id("s", "m1") == core.pause_id("s", "m1") != core.pause_id("s", "m2")
       != core.pause_id("s", "m1", "other") and gateway.PAUSE_ID_RE.fullmatch(core.pause_id("s", "m1")))

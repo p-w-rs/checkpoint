@@ -1,6 +1,60 @@
 # Changelog
 
-## 0.8.0 (unreleased)
+## 0.9.0 (2026-10-26)
+
+Only the latest Claude Code and pixi are supported, and nothing is kept for
+older versions of checkpoint, the gateway or Claude Code.
+
+- The pause-time checkpoint (`checkpoint.json`) no longer goes into your
+  project: it is written in the state folder, next to its task's journal
+  (`journal/<task>/checkpoint-<session>.json`), and removed with it. The hook
+  no longer adds `.work/` to a clone's exclude file (the session note still
+  asks Claude to, when it starts a tracker). `/check:resume <tracker>` takes
+  the tracker's newest checkpoint, whichever session wrote it, also when that
+  session reached the project through a symlink or the scrubber masked part
+  of the path. `checkpoint.json` files earlier versions left in
+  `<project>/.work/<task>/` are no longer read; delete them.
+- A gateway without the `pause_id` feature (before 0.9) counts as a contract
+  mismatch: checkpoint works alone beside it. A pause whose answer was lost
+  is simply sent again with the same pause id; the hold and the
+  `pause.applied` look-up for older gateways are gone.
+- Removed: turning 0.1's global `paused-all` file into flags, making a state
+  folder from before 0.3 private, reading checkpoints without `paused_ts`
+  or `session_id`, and the background tools Claude Code no longer has
+  (`TaskOutput`, `BashOutput`, `KillShell` and others: only `TaskStop` and
+  the task notifications are read). The files these left in the state folder
+  (`paused-all`, `now-all`, `.modes-v1`) are no longer touched: `purge` names
+  them as files it doesn't know; delete them.
+- The runtime's Python is the newest from conda-forge (3.15), no longer
+  pinned to 3.12.
+- pixi 0.83 or newer is needed (`requires-pixi`, the pixi that made the
+  lock); an older one refuses the runtime's manifest, so the setup fails and
+  says to update pixi. `/check:doctor` shows pixi's version without a tested
+  range and calls out one below that.
+- A job the gateway runs gets your session's environment, as checkpoint's
+  own runner would, minus credential variables: Claude Code's own
+  (`ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, ...) and any name the
+  scrubber treats as secret (`GH_TOKEN`, `PGPASSWORD`, ...), but not the ssh
+  agent's `SSH_AUTH_SOCK`. git's config variables (`GIT_CONFIG_COUNT`,
+  `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>`, `GIT_CONFIG_PARAMETERS`) are
+  sent without the entries that hold a credential, so git still runs. Sent
+  only to a gateway that lists the `job_env` feature (gateway 0.11);
+  checkpoint keeps no copy.
+- A gateway 0.11 refusal for a right that is off in one permission mode
+  ("ssh is off for homelab in Auto mode (gateway.toml)") keeps the right's
+  name in the task's authorization records, as one off in every mode does.
+- `/check:doctor`'s advice for a pixi that is too old adds your package
+  manager (Homebrew, MacPorts) to `pixi self-update`.
+- Docs: the README states the latest Claude Code and pixi, with no old
+  minimums or rollback recipe; its upgrade note says only what older records
+  still hold. The README and `/check:help` describe gateway 0.11 (a new
+  install configures nothing and asks about network commands, so a job's are
+  refused unless `[network]` allows them); git is worded as the gateway
+  words it; the mod's tests are for the latest Claude Code. The README's
+  first-five-minutes pause runs `sleep 20`: Claude Code refuses a foreground
+  `sleep` of 25 seconds or more.
+
+## 0.8.0 (2026-10-23)
 
 Your data:
 

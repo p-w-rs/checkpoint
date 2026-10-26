@@ -166,8 +166,7 @@ exit 1" && chmod 700 "$st/checkpoint" 2>/dev/null
 }
 
 sid=$(ck_safe "$(field session_id)")
-# paused-all is version 0.1's global flag; Python turns it into flags.
-paused() { [ -e "$st/flags/$sid" ] || [ -e "$st/paused-all" ]; }
+paused() { [ -e "$st/flags/$sid" ]; }
 
 # The tool of a tool event, only when the payload has exactly one tool_name
 # key, so nothing nested in tool_input can pose as one.

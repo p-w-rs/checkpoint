@@ -115,9 +115,20 @@ check("CHECKPOINT_GATEWAY_CONTRACT set but empty: turned off in both (no path at
       g_.status == "off" and w_ == "off")
 D1 = gwfake().start()
 g_, w_, line_ = both()
-check("a live daemon with contract gateway.v1, versions [1], its socket: available in both, with version and epoch",
-      g_.ok and w_ == "available" and "gateway 0.8.0" in line_ and "epoch 1" in line_ and g_.epoch == 1
-      and g_.has("jobs"))
+check("a live daemon with contract gateway.v1, versions [1], its socket: available in both, with version and epoch "
+      "(the file as the gateway writes it, indent=1: sh reads its lists across lines)",
+      g_.ok and w_ == "available" and "gateway 0.10.0" in line_ and "epoch 1" in line_ and g_.epoch == 1
+      and g_.has("jobs") and '\n  "pause_id"' in GWC_PATH.read_text())
+D1.write_contract(features=["hosts", "events", "pause", "jobs", "terminals", "remote", "workspaces", "accounts"])
+g_, w_, line_ = both()
+check("features without pause_id (a gateway before 0.9): a contract mismatch in both, never 'available'",
+      g_.status == "mismatch" and w_ == "mismatch" and "its features lack pause_id" in g_.reason
+      and "its features lack pause_id" in line_)
+D1.write_contract(features="pause_id")
+g_, w_, line_ = both()
+check("...and features that aren't a list: a mismatch in Python (sh reads no list either)",
+      g_.status == "mismatch" and w_ == "mismatch")
+D1.write_contract()
 D1.write_contract(pid=dead_pid())
 g_, w_, line_ = both()
 check("a dead pid: not available (dead: the contract file is stale), in both", g_.status == "dead" and w_ == "dead"
@@ -228,6 +239,104 @@ check("the same call again (same tool_use_id, so the same idempotency key): the 
       out2.get("ok") and out2["job"]["gateway_job"] == GJB
       and sum(1 for j in jobs._registry()["jobs"].values() if j.get("gateway_job") == GJB) == 1
       and len(D1.jobs) == 1)
+# Feature job_env (gateway 0.11, PLAN-0.11 §19.14): the gateway runs a delegated
+# job with checkpoint's environment, as the own runner would (job_env: our pixi
+# activation gone), minus credential names: Claude Code's own and what the
+# scrubber treats as sensitive. Canaries only; never printed.
+_EV_KEEP = {"CK_JOBENV_PLAIN": "plain-" + _rand(16), "CK_JOBENV_SPACES": "a b  c"}
+_EV_DROP = {n: "cnry" + _rand(28) for n in (
+    "MY_SERVICE_TOKEN", "PGPASSWORD", "AWS_SECRET_ACCESS_KEY", "GITHUB_PAT", "DB_PASSPHRASE",
+    "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_CLIENT_CERT", "ANTHROPIC_CLIENT_CERT_PATH",
+    "ANTHROPIC_CUSTOM_HEADERS", "ALL_INPUTS")}
+_EV_DROP["ANTHROPIC_CUSTOM_HEADERS"] = "Authorization: Bearer " + _EV_DROP["ANTHROPIC_CUSTOM_HEADERS"]
+_EV_SOCK = {"SSH_AUTH_SOCK": str(GT / "agent.sock"), "SSH_AGENT_PID": "4242", "GIT_ASKPASS": "/usr/bin/true"}
+_EV_PIXI = {"PIXI_PROJECT_ROOT": str(ROOT), "PIXI_PROJECT_MANIFEST": str(ROOT / "pixi.toml"),
+            "PATH": str(ROOT / ".pixi" / "envs" / "default" / "bin") + os.pathsep + os.environ.get("PATH", "")}
+mcall("job_start", {"name": "envjob", "command": "make env", "cwd": str(PJ), "redo_hint": "r"},
+      dict(EMJ, **_EV_KEEP, **_EV_DROP, **_EV_SOCK, **_EV_PIXI), tid="toolu_gwjob_env")
+_ev_post = next((r["body"] for r in D1.calls("POST", "/v1/jobs") if r["body"].get("command") == "make env"), {})
+_ev = _ev_post.get("env")
+_ev_job = next((j for j in D1.jobs.values() if j["command"] == "make env"), {})
+check("a gateway that lists job_env gets `env` with job_start: the session's environment (its own variables, "
+      "HOME, PATH) as the own runner would give it",
+      isinstance(_ev, dict) and all(_ev.get(k) == v for k, v in _EV_KEEP.items())
+      and _ev.get("HOME") == os.environ.get("HOME") and bool(_ev.get("PATH"))
+      and _ev_job.get("env") == _ev)
+check("...minus every credential name (Claude Code's own: CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY, "
+      "CLAUDE_CODE_CLIENT_CERT, ANTHROPIC_CUSTOM_HEADERS, ALL_INPUTS, any CLAUDE_*/ANTHROPIC_* with a credential "
+      "word; and what the scrubber treats as sensitive: *_TOKEN, PGPASSWORD, *_SECRET_*, *_PAT, *_PASSPHRASE): "
+      "none of their names or values is sent",
+      isinstance(_ev, dict) and not set(_EV_DROP) & set(_ev)
+      and not any(v in json.dumps(_ev_post) for v in _EV_DROP.values()))
+check("...but the ssh agent's socket and pid and the askpass program are sent (SSH_AUTH_SOCK's \"auth\" "
+      "names no secret: the job can use the agent, as Claude's Bash can)",
+      isinstance(_ev, dict) and all(_ev.get(k) == v for k, v in _EV_SOCK.items()))
+check("...and without checkpoint's own pixi activation (job_env: PIXI_PROJECT_* and its .pixi bin folder gone)",
+      isinstance(_ev, dict) and "PIXI_PROJECT_ROOT" not in _ev and "PIXI_PROJECT_MANIFEST" not in _ev
+      and str(ROOT / ".pixi") not in _ev.get("PATH", ""))
+check("...and checkpoint keeps none of it: the registry record and the journal hold no env",
+      reg_rec("envjob") is not None and "env" not in reg_rec("envjob")
+      and not scan_for([_EV_KEEP["CK_JOBENV_PLAIN"], *_EV_DROP.values()], Path(os.environ["CHECKPOINT_HOME"])))
+check("jobs.credential_name: Claude Code's own credential variables and the scrubber's sensitive names; not "
+      "ordinary ones",
+      lambda: all(jobs.credential_name(n) for n in (*_EV_DROP, "CLAUDE_CODE_HOST_CREDS_FILE", "CLAUDE_X_COOKIE",
+                                                     "GH_TOKEN"))
+      and not any(jobs.credential_name(n) for n in ("HOME", "PATH", "LANG", "CLAUDE_CODE_SESSION_ID",
+                                                    "CLAUDE_PROJECT_DIR", "ANTHROPIC_BASE_URL", "CK_JOBENV_PLAIN",
+                                                    "TOKENIZERS_PARALLELISM", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
+                                                    "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE", "GIT_ASKPASS")))
+# git's config from the environment is one unit: git stops on a GIT_CONFIG_COUNT
+# whose KEY_<n> or VALUE_<n> is missing ("missing config key"), and a dropped
+# GIT_CONFIG_KEY_<n> (its "key") once broke every git command in a gateway job
+# while the value beside it, where a secret header sits, was sent anyway.
+_GC_BASE = {"HOME": str(GT), "PATH": os.environ.get("PATH", ""), "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1"}
+_GC_CNRY = ["cnry" + _rand(28) for _ in range(4)]
+_GC_KEPT = "kept-" + _rand(8)
+_GC_SENT = jobs.gateway_job_env(dict(
+    _GC_BASE, GIT_CONFIG_COUNT="5",
+    GIT_CONFIG_KEY_0="http.https://example.com/.extraHeader", GIT_CONFIG_VALUE_0="X-Ck-Header: " + _GC_CNRY[0],
+    GIT_CONFIG_KEY_1="ck.plain", GIT_CONFIG_VALUE_1=_GC_KEPT,
+    GIT_CONFIG_KEY_2="imap.pass", GIT_CONFIG_VALUE_2=_GC_CNRY[1],
+    GIT_CONFIG_KEY_3="remote.origin.url", GIT_CONFIG_VALUE_3=f"https://octocat:{_GC_CNRY[2]}@example.com/x.git",
+    GIT_CONFIG_KEY_4="core.abbrev", GIT_CONFIG_VALUE_4="12",
+    GIT_CONFIG_VALUE_7="Authorization: Bearer " + _GC_CNRY[3]))
+
+
+def _git_get(env, name):
+    r = subprocess.run(["git", "config", "--get", name], capture_output=True, text=True, timeout=30, env=env,
+                       cwd=str(GT))
+    return r.returncode, r.stdout.strip(), r.stderr
+
+
+check("a gateway job's git config from the environment (GIT_CONFIG_COUNT/KEY_<n>/VALUE_<n>): the entries that hold "
+      "a credential (an http extraHeader, imap.pass, a URL with user:pw@) go, the others are numbered again from 0 "
+      "with their own count; a VALUE_<n> beyond the count goes too; no canary is sent",
+      {k: v for k, v in _GC_SENT.items() if k.startswith("GIT_CONFIG_") and k not in _GC_BASE}
+      == {"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "ck.plain", "GIT_CONFIG_VALUE_0": _GC_KEPT,
+          "GIT_CONFIG_KEY_1": "core.abbrev", "GIT_CONFIG_VALUE_1": "12"}
+      and not any(c in json.dumps(_GC_SENT) for c in _GC_CNRY))
+check("...and git runs with what is sent (no \"missing config key\"): the kept entries apply",
+      _git_get(_GC_SENT, "ck.plain")[:2] == (0, _GC_KEPT) and _git_get(_GC_SENT, "core.abbrev")[:2] == (0, "12"))
+_GP_OK = "'ck.param'='p-" + _GC_KEPT + "' 'core.quotepath'='false'"
+_GP_SENT = [jobs.gateway_job_env(dict(_GC_BASE, GIT_CONFIG_PARAMETERS=p)).get("GIT_CONFIG_PARAMETERS") for p in (
+    _GP_OK, _GP_OK + " 'http.extraHeader'='Authorization: Bearer " + _GC_CNRY[0] + "'",
+    "'url.https://octocat:" + _GC_CNRY[2] + "@example.com/.insteadOf'='https://example.com/'",
+    "'ck.param'='unterminated")]
+check("GIT_CONFIG_PARAMETERS (git -c) is sent whole, or not at all when an entry holds a credential or it can't "
+      "be read; git applies what is sent",
+      _GP_SENT == [_GP_OK, None, None, None]
+      and _git_get(dict(_GC_BASE, GIT_CONFIG_PARAMETERS=_GP_SENT[0]), "ck.param")[:2] == (0, "p-" + _GC_KEPT))
+D1.features.remove("job_env")
+D1.write_contract()
+mcall("job_start", {"name": "noenvjob", "command": "make noenv", "cwd": str(PJ), "redo_hint": "r"},
+      dict(EMJ, **_EV_KEEP), tid="toolu_gwjob_noenv")
+_nev_post = next((r["body"] for r in D1.calls("POST", "/v1/jobs") if r["body"].get("command") == "make noenv"), None)
+check("a gateway that doesn't list job_env gets no `env` (the start goes there all the same)",
+      _nev_post is not None and "env" not in _nev_post and reg_rec("noenvjob") is not None
+      and reg_rec("noenvjob")["owner"] == "gateway")
+D1.features.append("job_env")
+D1.write_contract()
 pol, _ = mcall("task_policy", {"on_pause": "suspend", "on_cancel": "detach"}, EMJ)
 mcall("job_start", {"name": "train", "command": "python train.py", "cwd": str(PJ), "redo_hint": "resumes"},
       EMJ, tid="toolu_gwjob_2")
@@ -914,6 +1023,17 @@ check("...pause works alone, and says the gateway wasn't reached (why)", state.i
       and "gateway contract mismatch" in ctx(out) and not D2.calls("POST", "/v1/pause"))
 hook("UserPromptSubmit", jbase(SA_, PA_, TPA_, prompt="resume"), EHA_)
 D2.close()
+D2b = gwfake(features=["hosts", "events", "pause", "jobs", "terminals"]).start()
+omb, _ = mcall("job_start", {"name": "nopauseid", "command": "true", "cwd": str(PA_), "redo_hint": "r"}, EMA_,
+               tid="toolu_a_3")
+out = hook("UserPromptSubmit", jbase(SA_, PA_, TPA_, prompt="/check:pause"), EHA_)
+check("a gateway without the pause_id feature (before 0.9): job_start runs in the own runner, a pause sends it "
+      "nothing, and both say the contract mismatch",
+      omb.get("ok") and omb.get("supervisor") == "checkpoint" and "its features lack pause_id" in omb.get("gateway", "")
+      and not D2b.calls("POST", "/v1/jobs") and state.is_paused(SA_) and "its features lack pause_id" in ctx(out)
+      and not D2b.calls("POST", "/v1/pause"))
+hook("UserPromptSubmit", jbase(SA_, PA_, TPA_, prompt="resume"), EHA_)
+D2b.close()
 
 # --- the MCP server follows the gateway's events -----------------------------------------
 print("gateway: the MCP server's thread records the gateway's events as they happen:")

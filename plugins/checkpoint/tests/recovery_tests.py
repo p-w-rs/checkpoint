@@ -106,13 +106,22 @@ check("...the failed deploy is a failure, with its exit code", lambda: "make dep
       and "FAILED (exit 3)" in section(s1.text, "Failures"))
 check("...a check-in (no status) is not an end: still 'its result was not observed', 'was waiting for input'",
       lambda: "npm run watch" in section(s1.text, "In flight") and "was waiting for input" in section(s1.text, "In flight"))
-hook("PreToolUse", rpay(SBG, BP, TBG, tool_name="TaskOutput", tool_use_id="to1", tool_input={"task_id": "b9z4"}), EB)
-hook("PostToolUse", rpay(SBG, BP, TBG, tool_name="TaskOutput", tool_use_id="to1", tool_input={"task_id": "b9z4"},
+hook("PreToolUse", rpay(SBG, BP, TBG, tool_name="TaskOutput", tool_use_id="to0", tool_input={"task_id": "b9z4"}), EB)
+hook("PostToolUse", rpay(SBG, BP, TBG, tool_name="TaskOutput", tool_use_id="to0", tool_input={"task_id": "b9z4"},
                          tool_response={"task": {"status": "killed", "exitCode": 143}}), EB)
 capture.ingest(SBG)
+check("a tool name Claude Code no longer has (TaskOutput) reports nothing about background work",
+      lambda: not [r for r in jrecs(TBGT) if r["kind"] == "background.result" and r["data"].get("via") == "TaskOutput"]
+      and "npm run watch" in section(summary.build(TBGT).text, "In flight"))
+hook("PreToolUse", rpay(SBG, BP, TBG, tool_name="TaskStop", tool_use_id="to1", tool_input={"shell_id": "b9z4"}), EB)
+hook("PostToolUse", rpay(SBG, BP, TBG, tool_name="TaskStop", tool_use_id="to1", tool_input={"shell_id": "b9z4"},
+                         tool_response={"message": "Successfully stopped task: b9z4", "task_id": "b9z4",
+                                        "task_type": "local_bash"}), EB)
+capture.ingest(SBG)
 s2 = summary.build(TBGT)
-check("a TaskOutput-like result naming the background id links too (here: stopped, exit 143)",
-      lambda: "npm run watch" in section(s2.text, "Failures") and "was stopped (exit 143)" in s2.text)
+check("a TaskStop naming the background id (by the shell_id it still accepts) links too: stopped, a stop the model "
+      "asked for",
+      lambda: "npm run watch" in section(s2.text, "Failures") and "was stopped (a stop the model asked for)" in s2.text)
 
 # An aborted turn's running Bash call goes on in the background with no
 # PostToolUse at all (measured, 2.1.301): only its intent and, later, the

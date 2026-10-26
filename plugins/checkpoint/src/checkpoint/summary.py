@@ -113,7 +113,7 @@ def _background(od: dict[str, Any], d: dict[str, Any] | None = None) -> str:
 
 def bg_result(st: "TaskState", op: str, od: dict[str, Any]) -> dict[str, Any] | None:
     """What became of work a call started in the background, as observed
-    later (a task notification, TaskOutput, TaskStop): the last final
+    later (a task notification, TaskStop): the last final
     record for its tool_use_id or background/agent id, else the last notice.
     None when nothing was observed."""
     res = od.get("result") or {}
@@ -173,7 +173,7 @@ class TaskState:
     checkpoints: list[dict[str, Any]] = field(default_factory=list)
     repo: dict[str, Any] | None = None
     continued_from: str = ""
-    # background.result records (task notifications, TaskOutput/TaskStop),
+    # background.result records (task notifications, TaskStop),
     # by the key they name: the start's tool_use_id, or its task/agent id.
     bg_results: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     finished: dict[str, Any] | None = None      # the last task.complete / task.cancel (cleared by task.reopen)

@@ -111,7 +111,7 @@ export function world(on: On, opts: { flagFails?: boolean; writeFails?: boolean;
     }
     if (mode === 'contract-path') return w.contractPath === undefined ? ran(1, '', 'no answer') : ran(0, `${w.contractPath}\n`)
     if (mode === 'run' && opts.answers?.[rest[0] ?? '']) return opts.answers[rest[0]!]!(rest)
-    if (mode === 'doctor') return ran(0, 'pixi: /bin/pixi (0.81.0; in the tested range 0.68.0 to 0.82.0)\nruntime: ready\ngate: normal\n')
+    if (mode === 'doctor') return ran(0, 'pixi: /bin/pixi (0.81.0)\nruntime: ready\ngate: normal\n')
     if (mode === 'run' && rest[0] === 'status') return ran(0, 'Sessions:\n- sess-1  working/idle\n')
     if (mode === 'run' && rest[0] === 'watch-fire') {
       // Python's `pause now` killed the guarded call: it ends.

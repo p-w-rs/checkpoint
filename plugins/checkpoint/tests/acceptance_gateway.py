@@ -2,7 +2,7 @@
 """Checkpoint with the gateway, both installed the normal way, in the real TUI
 (CONTRACT-v1; PLAN-v4 phase 4; brief 4, 6, 14.2, 14.4).
 
-    pixi exec --spec python=3.12 --spec pyte python tests/acceptance_gateway.py \\
+    pixi exec --spec python --spec pyte python tests/acceptance_gateway.py \\
         --tmp DIR [--keep] [--pixi-cache DIR] [--gateway DIR]
 
 A scratch Claude config into which both plugins are installed from their

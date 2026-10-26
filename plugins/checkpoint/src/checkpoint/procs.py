@@ -11,8 +11,8 @@ command inside may lead another, so we kill the whole descendant tree group
 by group.
 
 The command inside `eval` is shell-quoted by Claude Code ('"'"' for a single
-quote in 2.1.29x, '\\'' in older versions), and macOS `ps` shows a newline as
-\\012 without escaping backslashes. So the command is never matched as text:
+quote), and macOS `ps` shows a newline as \\012 without escaping
+backslashes. So the command is never matched as text:
 we read the shell's exact argv (/proc on Linux, sysctl on macOS), parse the
 argument of its `eval` the way the shell would, and compare that.
 """
